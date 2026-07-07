@@ -1,0 +1,36 @@
+FROM ubuntu:24.04
+
+# Set up a deliberately vulnerable machine for autoprivilege testing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 perl php ruby lua nodejs \
+    findutils vim less gawk sed gdb nmap \
+    tcpdump tar zip unzip rsync socat \
+    git ssh make npm gem pip \
+    docker.io sudo cron \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- VULNERABILITY 1: SUID python3 ---
+RUN chmod u+s /usr/bin/python3
+
+# --- VULNERABILITY 2: SUID find ---
+RUN chmod u+s /usr/bin/find
+
+# --- VULNERABILITY 3: Writable /etc/passwd ---
+RUN chmod 646 /etc/passwd
+
+# --- VULNERABILITY 4: Sudo NOPASSWD for find ---
+RUN echo "user ALL=(ALL) NOPASSWD: /usr/bin/find" >> /etc/sudoers
+
+# --- VULNERABILITY 5: Docker group ---
+RUN groupadd docker && useradd -m -s /bin/bash -G docker user || true
+
+# --- VULNERABILITY 6: Cron job writable ---
+RUN echo '*/5 * * * * root /usr/local/bin/backup.sh' > /etc/cron.d/backup && \
+    echo '#!/bin/bash' > /usr/local/bin/backup.sh && \
+    chmod 666 /usr/local/bin/backup.sh && \
+    chmod 777 /etc/cron.d/backup
+
+# --- VULNERABILITY 7: Writable PATH ---
+RUN chmod 777 /usr/local/bin
+
+CMD ["/bin/bash"]

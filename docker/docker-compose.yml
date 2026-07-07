@@ -1,0 +1,44 @@
+version: "3.8"
+
+networks:
+  autoprivilege-test:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+  # Vulnerable system — full attack surface
+  vulnerable:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.vulnerable
+    container_name: autoprivilege-vulnerable
+    networks:
+      - autoprivilege-test
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # Clean system — no vulnerabilities, should find nothing
+  clean:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.clean
+    container_name: autoprivilege-clean
+    networks:
+      - autoprivilege-test
+
+  # Edge cases system — tricky configurations
+  edgecases:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.edgecases
+    container_name: autoprivilege-edgecases
+    networks:
+      - autoprivilege-test
+    cap_add:
+      - SYS_ADMIN

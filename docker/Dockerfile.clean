@@ -1,0 +1,24 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    sudo \
+    python3 \
+    vim \
+    cron \
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user with standard permissions
+RUN useradd -m -s /bin/bash testuser && \
+    echo "testuser:testuser" | chpasswd
+
+# No vulnerabilities — standard secure configuration
+COPY autoprivilege /usr/local/bin/autoprivilege
+RUN chmod +x /usr/local/bin/autoprivilege
+
+USER testuser
+WORKDIR /home/testuser
+
+CMD ["sleep", "infinity"]

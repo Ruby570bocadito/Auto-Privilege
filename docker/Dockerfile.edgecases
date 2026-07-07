@@ -1,0 +1,72 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    sudo \
+    python3 \
+    vim \
+    gawk \
+    sed \
+    less \
+    perl \
+    ruby \
+    php-cli \
+    lua5.3 \
+    nodejs \
+    nmap \
+    tar \
+    zip \
+    cron \
+    openssh-server \
+    gcc \
+    make \
+    libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user
+RUN useradd -m -s /bin/bash testuser && \
+    echo "testuser:testuser" | chpasswd
+
+# ============ EDGE CASE 1: SUID binary with custom PATH ============
+RUN mkdir -p /opt/secure/bin && \
+    cp /usr/bin/find /opt/secure/bin/custom-find && \
+    chmod u+s /opt/secure/bin/custom-find
+
+# ============ EDGE CASE 2: SUDO with specific arguments only ============
+RUN echo "testuser ALL=(root) NOPASSWD: /usr/bin/tar -cf /dev/null *" > /etc/sudoers.d/tar-sudo && \
+    chmod 440 /etc/sudoers.d/tar-sudo
+
+# ============ EDGE CASE 3: Cron with writable script but not cron file ============
+RUN echo "* * * * * root /opt/scripts/cleanup.sh" > /etc/cron.d/cleanup && \
+    mkdir -p /opt/scripts && \
+    echo '#!/bin/bash' > /opt/scripts/cleanup.sh && \
+    echo 'echo "cleanup"' >> /opt/scripts/cleanup.sh && \
+    chmod 644 /etc/cron.d/cleanup && \
+    chmod 777 /opt/scripts/cleanup.sh
+
+# ============ EDGE CASE 4: SUID shell binary ============
+RUN cp /bin/bash /usr/local/bin/root-shell && \
+    chmod u+s /usr/local/bin/root-shell
+
+# ============ EDGE CASE 5: Capabilities on binary ============
+RUN setcap cap_setuid+ep /usr/bin/python3.10
+
+# ============ EDGE CASE 6: NFS no_root_squash (simulated) ============
+RUN echo "/shared *(rw,no_root_squash)" > /etc/exports
+
+# ============ EDGE CASE 7: Writable /etc/passwd via ACL ============
+RUN chmod 666 /etc/passwd
+
+# ============ EDGE CASE 8: Password in bash history ============
+RUN echo 'mysql -u root -p"RootPass123!"' >> /home/testuser/.bash_history && \
+    echo 'ssh root@192.168.1.100' >> /home/testuser/.bash_history && \
+    chown testuser:testuser /home/testuser/.bash_history
+
+COPY autoprivilege /usr/local/bin/autoprivilege
+RUN chmod +x /usr/local/bin/autoprivilege
+
+USER testuser
+WORKDIR /home/testuser
+
+CMD ["sleep", "infinity"]

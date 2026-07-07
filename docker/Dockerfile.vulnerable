@@ -1,0 +1,108 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+    sudo \
+    vim \
+    gawk \
+    sed \
+    less \
+    bsdmainutils \
+    man-db \
+    wget \
+    curl \
+    gcc \
+    make \
+    python3 \
+    perl \
+    ruby \
+    php-cli \
+    lua5.3 \
+    nodejs \
+    nmap \
+    tcpdump \
+    tar \
+    zip \
+    unzip \
+    rsync \
+    socat \
+    git \
+    strace \
+    gdb \
+    cron \
+    docker.io \
+    openssh-server \
+    netcat-openbsd \
+    iputils-ping \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user
+RUN useradd -m -s /bin/bash testuser && \
+    echo "testuser:testuser" | chpasswd
+
+# ============ VULNERABILITY 1: SUID binaries ============
+RUN chmod u+s /usr/bin/find && \
+    chmod u+s /usr/bin/vim && \
+    chmod u+s /usr/bin/python3 && \
+    chmod u+s /usr/bin/gawk && \
+    chmod u+s /usr/bin/less && \
+    chmod u+s /usr/bin/nmap && \
+    chmod u+s /usr/bin/bash
+
+# ============ VULNERABILITY 2: Sudo NOPASSWD ============
+RUN echo "testuser ALL=(ALL) NOPASSWD: /usr/bin/find, /usr/bin/gawk, /usr/bin/sed" > /etc/sudoers.d/testuser
+
+# ============ VULNERABILITY 3: Writable cron job ============
+RUN echo "* * * * * root /usr/local/bin/backup.sh" > /etc/cron.d/backup && \
+    echo '#!/bin/bash' > /usr/local/bin/backup.sh && \
+    echo 'echo "backup running"' >> /usr/local/bin/backup.sh && \
+    chmod 777 /etc/cron.d/backup && \
+    chmod 777 /usr/local/bin/backup.sh && \
+    service cron start
+
+# ============ VULNERABILITY 4: Writable /etc/passwd ============
+RUN chmod 666 /etc/passwd
+
+# ============ VULNERABILITY 5: Readable /etc/shadow ============
+RUN chmod 644 /etc/shadow
+
+# ============ VULNERABILITY 6: Writable PATH directory ============
+RUN mkdir -p /opt/custom/bin && \
+    echo "/opt/custom/bin" >> /etc/environment && \
+    chmod 777 /opt/custom/bin
+
+# ============ VULNERABILITY 7: Writable systemd service ============
+RUN echo '[Unit]' > /etc/systemd/system/vuln.service && \
+    echo 'Description=Vulnerable Service' >> /etc/systemd/system/vuln.service && \
+    echo '[Service]' >> /etc/systemd/system/vuln.service && \
+    echo 'ExecStart=/bin/true' >> /etc/systemd/system/vuln.service && \
+    echo '[Install]' >> /etc/systemd/system/vuln.service && \
+    echo 'WantedBy=multi-user.target' >> /etc/systemd/system/vuln.service && \
+    chmod 666 /etc/systemd/system/vuln.service
+
+# ============ VULNERABILITY 8: SSH keys accessible ============
+RUN mkdir -p /home/testuser/.ssh && \
+    ssh-keygen -t rsa -b 2048 -f /home/testuser/.ssh/id_rsa -N "" && \
+    cp /home/testuser/.ssh/id_rsa.pub /home/testuser/.ssh/authorized_keys && \
+    chmod 644 /home/testuser/.ssh/authorized_keys && \
+    chmod 644 /home/testuser/.ssh/id_rsa && \
+    chown -R testuser:testuser /home/testuser/.ssh
+
+# ============ VULNERABILITY 9: Passwords in config files ============
+RUN echo 'DB_PASSWORD=SuperSecret123!' > /opt/custom/db.conf && \
+    echo 'API_KEY=sk-1234567890abcdef' > /opt/custom/.env && \
+    chmod 644 /opt/custom/db.conf /opt/custom/.env
+
+# ============ VULNERABILITY 10: Docker group ============
+RUN usermod -aG docker testuser 2>/dev/null || true
+
+# Copy autoprivilege binary (will be built externally)
+COPY autoprivilege /usr/local/bin/autoprivilege
+RUN chmod +x /usr/local/bin/autoprivilege
+
+# Switch to test user
+USER testuser
+WORKDIR /home/testuser
+
+CMD ["sleep", "infinity"]
