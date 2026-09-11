@@ -1,7 +1,12 @@
+# build artifacts
+autoprivilege
 Auto-Privilege
 Rise-Privilege
 peekaboo
 *.exe
 *.test
+# local test output
+test-results/
+gtfobins_update.json
+# legacy
 brain/
-

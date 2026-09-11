@@ -1,5 +1,3 @@
-version: "3.8"
-
 networks:
   autoprivilege-test:
     driver: bridge
@@ -8,7 +6,7 @@ networks:
         - subnet: 172.28.0.0/16
 
 services:
-  # Vulnerable system — full attack surface
+  # Vulnerable system — full attack surface (10 deliberate flaws)
   vulnerable:
     build:
       context: ..
@@ -16,12 +14,7 @@ services:
     container_name: autoprivilege-vulnerable
     networks:
       - autoprivilege-test
-    cap_add:
-      - SYS_ADMIN
-      - NET_ADMIN
     privileged: true
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
 
   # Clean system — no vulnerabilities, should find nothing
   clean:

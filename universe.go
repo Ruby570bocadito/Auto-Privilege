@@ -4,8 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/user"
 	"strings"
+	"syscall"
+	"time"
+	"unsafe"
 )
+
+const Version = "1.1.0"
 
 type RiskLevel int
 
@@ -50,56 +56,62 @@ func (r RiskLevel) Color() string {
 }
 
 type Finding struct {
-	Source      string   `json:"source"`
-	Target      string   `json:"target"`
-	Description string   `json:"description"`
+	Source      string    `json:"source"`
+	Target      string    `json:"target"`
+	Description string    `json:"description"`
 	Risk        RiskLevel `json:"risk"`
-	Exploitable bool     `json:"exploitable"`
+	Exploitable bool      `json:"exploitable"`
 }
 
 type Vector struct {
-	Name     string                 `json:"name"`
-	Risk     RiskLevel              `json:"risk"`
-	Target   string                 `json:"target"`
-	Command  string                 `json:"command"`
-	Category string                 `json:"category"`
+	Name     string                `json:"name"`
+	Risk     RiskLevel             `json:"risk"`
+	Target   string                `json:"target"`
+	Command  string                `json:"command"`
+	Category string                `json:"category"`
 	Exploit  func() *ExploitResult `json:"-"`
 	Meta     map[string]string     `json:"meta,omitempty"`
 }
 
 type ExploitResult struct {
-	Success   bool   `json:"success"`
-	Vector    string `json:"vector"`
-	Output    string `json:"output,omitempty"`
-	Error     string `json:"error,omitempty"`
-	IsRoot    bool   `json:"is_root"`
+	Success bool   `json:"success"`
+	Vector  string `json:"vector"`
+	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
+	IsRoot  bool   `json:"is_root"`
 }
 
 type Options struct {
-	Exploit      bool
-	MaxRisk      RiskLevel
-	Vector       string
-	JSON         bool
-	Quiet        bool
-	Rooteame     string
-	Stealth      bool
-	OneShot      bool
-	LHost        string
-	LPort        string
-	DryRun       bool
-	LogFormat    string
-	UpdateGTFO   bool
+	Exploit    bool
+	MaxRisk    RiskLevel
+	Vector     string
+	JSON       bool
+	Quiet      bool
+	Rooteame   string
+	Stealth    bool
+	OneShot    bool
+	LHost      string
+	LPort      string
+	DryRun     bool
+	LogFormat  string
+	UpdateGTFO bool
+	NoColor    bool
+	Verbose    bool
+	ListGTFO   bool
+	Report     string
 }
 
 type AutoPrivilege struct {
-	Opts     Options
-	Findings []Finding
-	Vectors  []Vector
-	Rooted   bool
+	Opts        Options
+	Findings    []Finding
+	Vectors     []Vector
+	Rooted      bool
+	LastSuccess bool
+	Started     time.Time
 }
 
 // ================================================================
-// Ansi colors
+// ANSI colors
 // ================================================================
 const (
 	AnsiReset  = "\033[0m"
@@ -113,20 +125,35 @@ const (
 	AnsiGrey   = "\033[90m"
 )
 
+// colorsEnabled is toggled once at startup: colors auto-disable when stdout
+// is not a terminal, when --no-color is passed, or when NO_COLOR is set.
+var colorsEnabled = true
+
+func setColorMode(enabled bool) { colorsEnabled = enabled }
+
+// isTerminal reports whether f is a real terminal (TTY). A plain char-device
+// check is not enough — /dev/null also matches — so we ask the kernel with
+// TCGETS, which only succeeds on actual ttys.
+func isTerminal(f *os.File) bool {
+	var termios syscall.Termios
+	_, _, errno := syscall.Syscall6(
+		syscall.SYS_IOCTL,
+		f.Fd(),
+		uintptr(syscall.TCGETS),
+		uintptr(unsafe.Pointer(&termios)),
+		0, 0, 0,
+	)
+	return errno == 0
+}
+
 func colorize(text, color string) string {
 	if text == "" {
 		return ""
 	}
+	if !colorsEnabled {
+		return text
+	}
 	return color + text + AnsiReset
-}
-
-func printBanner() {
-	fmt.Print(colorize(`
- ╔══════════════════════════════════════════╗
- ║     autoprivilege — Linux PrivEsc AutoPwn    ║
- ║     ruby570bocadito (c) 2026            ║
- ╚══════════════════════════════════════════╝
-`+"\n", AnsiCyan))
 }
 
 func (p *AutoPrivilege) Print(finding Finding) {
@@ -192,31 +219,28 @@ func (p *AutoPrivilege) PrintExploit(r *ExploitResult) {
 	}
 }
 
-func (p *AutoPrivilege) ExportJSON() error {
-	type Report struct {
-		Findings []Finding `json:"findings"`
-		Vectors  []Vector  `json:"vectors"`
-		Rooted   bool      `json:"rooted"`
-	}
-	r := Report{
-		Findings: p.Findings,
-		Vectors:  p.Vectors,
-		Rooted:   p.Rooted,
-	}
-	out, _ := json.MarshalIndent(r, "", "  ")
-	fmt.Println(string(out))
-	return nil
-}
+// ExportJSON prints the machine-readable report. Moved to report.go.
 
 func isRoot() bool {
 	return os.Geteuid() == 0
+}
+
+// currentUsername resolves the real username (env vars lie under su/sudo).
+func currentUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return os.Getenv("LOGNAME")
 }
 
 func amIRoot() string {
 	if isRoot() {
 		return colorize("ROOT", AnsiRed+AnsiBold)
 	}
-	return colorize(os.Getenv("USER"), AnsiGreen)
+	return colorize(currentUsername(), AnsiGreen)
 }
 
 func parseMaxRisk(s string) RiskLevel {
@@ -234,4 +258,18 @@ func parseMaxRisk(s string) RiskLevel {
 	default:
 		return RiskSafe
 	}
+}
+
+// validMaxRisks is used by flag validation to reject typos early.
+func validMaxRisk(s string) bool {
+	switch strings.ToLower(s) {
+	case "safe", "low", "medium", "high", "danger", "all":
+		return true
+	}
+	return false
+}
+
+// marshalJSON is a small helper that never ignores marshal errors silently.
+func marshalJSON(v interface{}) ([]byte, error) {
+	return json.MarshalIndent(v, "", "  ")
 }

