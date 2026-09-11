@@ -1,287 +1,181 @@
-<div align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,6&height=200&section=header&text=Auto-Privilege&fontSize=58&fontColor=fff&animation=twinkling&desc=Suite%20de%20Escalada%20de%20Privilegios%20en%20Linux&descSize=18&descAlignY=72" width="100%"/>
+<p align="center"><img src="docs/images/banner.png" alt="Banner de AUTOPRIV" width="820"></p>
 
-  <p>
-    <b>🇪🇸 Español</b> · <a href="./README.md">🇬🇧 English</a>
-  </p>
+<h1 align="center">AUTOPRIV</h1>
 
-  <p>
-    <img src="https://github.com/Ruby570bocadito/Auto-Privilege/actions/workflows/ci.yml/badge.svg" alt="CI"/>
-    <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
-    <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux"/>
-    <img src="https://img.shields.io/badge/gtfo-bins_75-blue?style=flat-square" alt="GTFOBins"/>
-    <img src="https://img.shields.io/badge/dependencies-zero-success?style=flat-square" alt="Dependencies"/>
-    <img src="https://img.shields.io/github/license/Ruby570bocadito/Auto-Privilege?style=flat-square&color=blue" alt="License"/>
-    <img src="https://img.shields.io/github/v/release/Ruby570bocadito/Auto-Privilege?style=flat-square&color=brightgreen" alt="Release"/>
-  </p>
-</div>
-
-# ⚠️ Aviso Ético
-
-> **Esta herramienta está diseñada solo para tests de seguridad autorizados, CTFs y fines educativos.**
->
-> - Úsala únicamente en sistemas que te pertenezcan o con permiso explícito por escrito
-> - El uso indebido puede violar leyes locales e internacionales
-> - El autor no se hace responsable de ningún daño causado por su mal uso
-
-**Estás avisado.**
-
----
-
-# 🚀 Visión General
-
-**Auto-Privilege** es una suite automatizada de escalada de privilegios en Linux: escanea el sistema en busca de configuraciones inseguras, las mapea a técnicas de explotación y **las ejecuta de la más segura a la más agresiva** hasta conseguir root — todo en **un único binario de Go sin dependencias**.
+<p align="center"><b>Suite automatizada de escalada de privilegios en Linux — escanea, enumera, hazte root.</b><br>
+Un binario Go. Cero dependencias. Resultados honestos.</p>
 
 <p align="center">
-  <img src="docs/images/banner.png" alt="Banner de Auto-Privilege" width="88%"/>
+  <a href="https://github.com/Ruby570bocadito/Auto-Privilege/actions/workflows/ci.yml"><img src="https://github.com/Ruby570bocadito/Auto-Privilege/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
+  <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+  <img src="https://img.shields.io/badge/tests-23%20passing-brightgreen" alt="Tests">
 </p>
 
-| Fase | Modo | Descripción |
-|------|------|-------------|
-| **1 · SCAN** | solo lectura | 15 escáneres pasivos: SUID, sudo, cron, capabilities, kernel, credenciales… |
-| **2 · ENUMERATE** | solo lectura | Los hallazgos se cruzan con una base GTFOBins de 75 técnicas (embebida) |
-| **3 · EXPLOIT** | mutante | Los vectores se ejecutan de más seguro a más agresivo con techo `--risk`; todo tiene marcha atrás |
-
-Todo lo que la herramienta **no puede automatizar con seguridad** se imprime como **vector manual** con el comando exacto — nunca finge haber ejecutado algo que no ejecutó.
+<p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
 
 ---
 
-# 🎬 Demo
+## Qué es AUTOPRIV?
 
-El GIF es una sesión real dentro del **lab rootless** (un namespace de usuario con un sistema vulnerable falso — sin Docker, sin root real):
+AUTOPRIV es una herramienta post-explotación para trabajo de seguridad Linux **autorizado**: laboratorios, CTFs y sistemas propios. Dejas el binario estático en una máquina, audita el sistema en modo solo-lectura en segundos y te dice — con evidencias — cada vía de escalada local que encuentra. Si se lo pides, recorre esas vías por ti, siempre de la técnica más segura a la más agresiva, y se detiene en cuanto consigue `uid=0`.
 
-<p align="center">
-  <img src="docs/images/demo-lab.gif" alt="Demo de Auto-Privilege" width="88%"/>
-</p>
+Está pensada para dos momentos muy distintos. En un engagement es la forma más rápida de responder "puede esta máquina ser root, y cómo?". En una sesión de estudio es un profesor: cada hallazgo explica el vector, el riesgo y el comando exacto que ejecutaría un operador, para que puedas reproducirlo a mano y aprender la técnica de verdad.
 
-1. **Scan** del lab: SUID `python3`/`find`, cron escribible, `/etc/passwd` escribible, shadow legible, hijack de systemd, heurística de CVEs del kernel
-2. **Dry-run**: el plan de ejecución exacto, de más seguro a más agresivo, con cada comando que ejecutaría
-3. **Escalar**: la técnica GTFOBins de SUID abre una shell root dentro del lab (`id` → `uid=0`)
+Todo en ella es deliberadamente honesto. Los vectores que no puede verificar automáticamente se marcan `manual` en vez de fingir. Los CVEs de kernel coincidentes avisan *verify before use (heuristic)*. Cuando llega a root imprime la evidencia `uid=0` desde la propia shell, y cuando no llega, lo dice y sale con código 1.
 
-> Reprodúcelo tú mismo: `lab/rootless_lab.sh` — detalles en [Lab Rootless](#-lab-rootless-sin-docker-sin-root).
+## Lo más importante
 
----
+| | |
+|---|---|
+| **15 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible, inyección en passwd/shadow, grupo docker, capabilities (bitmask y file caps), NFS, directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud |
+| **75 técnicas GTFOBins** | embebidas en el binario — funciona air-gapped; actualizable desde upstream con un comando |
+| **Auto-explotación de más seguro a más agresivo** | técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root |
+| **Dos modos de salida** | terminal humano con rampa de color, o `--json` para máquinas; `--report` markdown opcional con evidencias |
+| **Laboratorio rootless** | `lab/rootless_lab.sh` monta una caja fake-vulnerable dentro de un user namespace — sin Docker, sin root real, no toca tu sistema |
+| **Amigable para scripts** | `--quiet` + códigos de salida (`0` root, `1` sin root, `2` error), `--no-color` automático al pipear, `NO_COLOR` respetado |
 
-# ✨ Características
+## Cómo funciona
 
-## 15 Escáneres (todos de solo lectura)
+**1 — Escaneo.** Cada escáner corre en solo-lectura y emite hallazgos con etiquetas de riesgo: `[.]` informativo, `[+]` explotable, `[!]` destacable. La fase nunca modifica la máquina — lee sudoers, cron, passwd/shadow, mounts, capabilities, versión de kernel, history y ficheros de configuración.
 
-| # | Escáner | Detección | Riesgo |
-|---|---------|-----------|--------|
-| 1 | **Binarios SUID** | 9 directorios comunes + cruce con GTFOBins | Bajo→Alto |
-| 2 | **Reglas sudo** | parseo de `sudo -n -l`, NOPASSWD + grupo sudo | Alto |
-| 3 | **Cron escribible** | directorios cron + scripts referenciados | Alto |
-| 4 | **/etc/passwd** | test real de escritura (no solo bits de modo) | Alto |
-| 5 | **/etc/shadow** | test real de lectura/escritura | Alto/Peligro |
-| 6 | **Docker** | membresía de grupo + socket escribible | Alto |
-| 7 | **Caps de proceso** | decodificación del bitmask CapEff | Bajo→Medio |
-| 8 | **File caps** | `getcap -r` buscando `cap_setuid+ep` | Medio |
-| 9 | **Exports NFS** | `no_root_squash` en /etc/exports | Alto |
-| 10 | **PATH escribible** | directorios del PATH escribibles por no-propietario | Alto |
-| 11 | **Unidades systemd** | ficheros .service escribibles | Alto |
-| 12 | **CVEs de kernel** | por rango de versiones: Dirty Pipe, OverlayFS, StackRot, nf_tables UAF | Medio/Alto |
-| 13 | **PwnKit** | pkexec SUID (CVE-2021-4034, es polkit — no el kernel) | Alto |
-| 14 | **Versión de sudo** | Baron Samedit (CVE-2021-3156, corregido en 1.9.5p2) | Alto |
-| 15 | **Credenciales** | claves SSH, contraseñas en configs, secretos en history, metadata cloud | Bajo→Alto |
+**2 — Enumeración.** Los hallazgos se convierten en vectores. Cada vector recibe una técnica concreta y el comando exacto que se ejecutaría, sacado de la base GTFOBins embebida cuando aplica (SUID `python3`, `find`, `vim`, ...). Los vectores que necesitan decisión humana se marcan `manual`.
 
-## Técnicas de Escalada
+**3 — Explotación (opt-in).** Con `--exploit`, los vectores se ordenan de más seguro a más agresivo y se ejecutan bajo el tope de riesgo. La sesión termina en cuanto se confirma `uid=0` — o tras agotar la lista, con un honesto `no root` y código de salida 1.
 
-| Técnica | ¿Auto? | Riesgo |
-|---------|:------:|--------|
-| Shell SUID vía GTFOBins (`bash -p`, `python -c 'os.execl…'`) | ✅ | 🟢 Bajo / 🔴 Alto |
-| sudo NOPASSWD vía técnica GTFOBins | ✅ | 🟠 Medio / 🔴 Alto |
-| sudo ALL → `sudo -i` | ✅ | 🔴 Alto |
-| Inyección en cron (reverse shell con tu `--lhost/--lport`) | ✅ | 🔴 Alto |
-| Inyección root2 en `/etc/passwd` (hash sha512-crypt real) | ✅ | 🔴 Alto |
-| Escape de Docker (`-v /:/mnt chroot`) | ✅ | 🔴 Alto |
-| Intérprete `cap_setuid+ep` → `setuid(0)` | ✅ | 🟠 Medio |
-| Shadow legible → hash para crackear offline | ✅ (lectura) | 🔴 Alto |
-| NFS no_root_squash | 📋 manual | 🔴 Alto |
-| Plantado de binario en PATH | 📋 manual | 🔴 Alto |
-| Hijack de ExecStart de systemd | 📋 manual | 🔴 Alto |
-| Exploits de CVEs de kernel | 📋 manual | 🟠/🔴 |
-| Sobrescritura de shadow | 📋 manual | 💀 Peligro |
+## Inicio rápido
 
-**🟢 SEGURO por defecto**: `--exploit` solo ejecuta vectores por debajo de `--risk=safe` hasta que subas el techo — la herramienta prefiere no hacer nada destructivo antes que estropear el sistema.
+**Descarga un binario de release** (linux amd64 / arm64, enlazado estático):
 
----
+```bash
+curl -LO https://github.com/Ruby570bocadito/Auto-Privilege/releases/latest/download/autoprivilege-linux-amd64
+chmod +x autoprivilege-linux-amd64 && mv autoprivilege-linux-amd64 autoprivilege
+./autoprivilege --help
+```
 
-# 📦 Inicio Rápido
+**O compílalo desde fuente** (Go 1.26+, sin dependencias que descargar):
 
 ```bash
 git clone https://github.com/Ruby570bocadito/Auto-Privilege.git
 cd Auto-Privilege
 go build -o autoprivilege .
-
-# auditoría de solo lectura de esta máquina (seguro: no cambia nada)
 ./autoprivilege
-
-# muestra el plan de ejecución sin ejecutar nada
-./autoprivilege --exploit --dry-run --risk=medium
-
-# auto-explotar, técnicas más seguras primero
-./autoprivilege --exploit --risk=low
 ```
 
-Requiere Go 1.26+ para compilar. El binario es estático y funciona en cualquier Linux.
-
----
-
-# ⚡ Todos los Comandos
-
-| Comando | Descripción |
-|---------|-------------|
-| `./autoprivilege` | escaneo + enumeración de solo lectura |
-| `./autoprivilege --exploit` | auto-explotación (techo SAFE por defecto) |
-| `./autoprivilege --exploit --risk=medium` | subir el techo de riesgo |
-| `./autoprivilege --exploit --dry-run` | imprime el plan, no ejecuta nada |
-| `./autoprivilege --vector=suid,sudo,cron` | centrarse en vectores concretos |
-| `./autoprivilege --exploit --one-shot` | parar tras el primer éxito |
-| `./autoprivilege --json` | informe legible por máquina en stdout |
-| `./autoprivilege --report auditoria.md` | informe de evidencias en markdown |
-| `./autoprivilege --list-gtfo` | volcar la base GTFOBins embebida |
-| `./autoprivilege --update-gtfobins` | actualizar la DB desde upstream (persistida en `~/.autoprivilege/`) |
-| `./autoprivilege --quiet` | solo código de salida: **0 = root, 1 = sin root** |
-| `./autoprivilege --stealth` | pausas aleatorias entre escáneres/explotaciones |
-| `./autoprivilege --lhost 10.0.0.1 --lport 4444` | listener de reverse shell para la inyección en cron |
-| `./autoprivilege --no-color` | sin colores (auto al hacer pipe, respeta `NO_COLOR`) |
-| `./autoprivilege --verbose` / `--log json` | diagnósticos en stderr |
-| `./autoprivilege --version` / `--help` | metadatos / ayuda completa |
-
-**Códigos de salida:** `0` root o escaneo simple · `1` explotación sin root · `2` error de uso.
-
----
-
-# 🧪 Lab Rootless (sin Docker, sin root)
-
-`lab/rootless_lab.sh` monta un **sistema vulnerable falso dentro de un namespace de usuario** (`unshare -r -m`):
-
-- `/etc` es un bind-mount temporal: passwd/shadow escribibles, cron escribible, unidad systemd escribible
-- `/usr/bin` es un bind-mount temporal con `python3` y `find` con bit SUID
-- Los bits SUID solo dan el root *mapeado del namespace* — tu sistema jamás se toca
+**O pruébalo primero en el laboratorio seguro:**
 
 ```bash
-./lab/rootless_lab.sh                             # escanear el lab
-./lab/rootless_lab.sh --exploit --dry-run --risk=danger
-./lab/rootless_lab.sh --shell                     # shell dentro del lab
+lab/rootless_lab.sh                  # escaneo solo-lectura de una caja fake vulnerable
+lab/rootless_lab.sh --exploit        # míralo escalar hasta uid=0 en un namespace
 ```
 
-Dentro de la shell del lab, ejecuta la técnica GTFOBins tú mismo y mira cómo funciona:
+## Uso
 
-```bash
-/usr/bin/python3.13 -c 'import os; os.setuid(0); os.execl("/bin/sh","sh","-p")'
-id    # uid=0(root) — dentro del namespace
+```
+autoprivilege [opciones]
+
+Modos:
+  (por defecto)             escaneo + enumeración (solo-lectura, sin cambios)
+  --exploit                 auto-explota los vectores encontrados, del riesgo menor al mayor
+  --dry-run                 escanea y muestra qué ejecutaría sin correr nada
+  --list-gtfo               imprime la base GTFOBins embebida
+  --update-gtfobins         refresca la base GTFOBins desde upstream (persistida)
+
+Filtrado:
+  --vector lista            separada por comas: suid,sudo,cron,passwd,shadow,
+                            docker,caps,nfs,path,service,kernel,cred
+  --risk nivel              riesgo máximo de auto-explotación: safe|low|medium|high|danger
+  --one-shot                parar tras el primer exploit exitoso
+  --lhost ip                host del listener de reverse-shell (autodetectado)
+  --lport puerto            puerto del listener (por defecto 4444)
+
+Salida:
+  --json                    informe legible por máquina en stdout
+  --report fichero          escribe además un informe markdown con evidencias
+  --quiet                   sin salida; código 0 = root, 1 = sin root
+  --no-color                desactiva colores ANSI (auto al pipear)
+  --verbose                 logging de debug en stderr
+  --log fmt                 formato de log: text|json (stderr)
+
+Varios:
+  --stealth                 jitter entre escáneres y exploits
+  --version                 imprime versión
+  -h, --help                esta ayuda
 ```
 
-Requiere `unshare` (util-linux) y namespaces de usuario activados. Sin Docker, sin sudo, sin root — perfecto para demos, clases y CI.
+Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ejecución.
 
----
+## Vectores cubiertos
 
-# 🐳 Testing con Docker
+| Vector | Qué comprueba | Auto? |
+|---|---|---|
+| `suid` | binarios SUID/SGID + match GTFOBins (`python3`, `find`, ...) | sí |
+| `sudo` | reglas sudo -l, entradas NOPASSWD, CVEs por versión de sudo (rango Baron Samedit) | parcial |
+| `cron` | `/etc/cron*` escribible, jobs cron con PATH | sí |
+| `passwd` | `/etc/passwd` escribible — inyección de usuario root | sí |
+| `shadow` | `/etc/shadow` legible — extracción de hashes | sí |
+| `docker` | grupo docker / acceso al socket → root del host | parcial |
+| `caps` | procesos cap_setuid, file capabilities (`getcap -r /`) | sí |
+| `nfs` | exports no_root_squash | manual |
+| `path` | directorios escribibles en el PATH de root | sí |
+| `service` | unidades systemd escribibles / secuestro PathChanged | sí |
+| `kernel` | CVEs por rango de kernel: Dirty Pipe, OverlayFS, StackRot, nf_tables; PwnKit vía pkexec | parcial |
+| `cred` | contraseñas en history, configs, metadata cloud (imds, timeout 800 ms) | sí |
+
+`parcial` significa que AUTOPRIV prepara el terreno (checks de versión, parseo de reglas) pero un humano confirma el paso final — la herramienta lo dice en vez de fingirlo.
+
+## Formatos de salida
+
+**Terminal** — hallazgos coloreados con evidencia por línea y resumen final:
+
+```
+[!] CRON → Writable cron job — inject command (/etc/cron.d/backup)
+[+] SUID → SUID binary: find (GTFOBins: true) (/usr/bin/find)
+
+Summary — 9 exploitable
+  vectors  9  (auto 6 · manual 3)
+  risks    LOW 1  MEDIUM 1  HIGH 6  DANGER 1
+  rooted   NO
+```
+
+**JSON** (`--json`) — un objeto en stdout, listo para `jq`:
 
 ```bash
-cd docker
-docker compose build && docker compose up -d
+$ autoprivilege --json --quiet | jq '.summary'
+{ "vectors": 9, "auto": 6, "manual": 3, "rooted": false }
+```
 
-docker exec autoprivilege-vulnerable /usr/local/bin/autoprivilege
-docker exec autoprivilege-clean /usr/local/bin/autoprivilege
-docker exec autoprivilege-edgecases /usr/local/bin/autoprivilege --vector=sudo
+**Markdown** (`--report audit.md`) — secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
 
-# suite completa (build, tests, validación JSON, anti-falsos-positivos, smoke tests)
+## El laboratorio rootless
+
+El lab es una caja fake comprometida construida dentro de un **user namespace** (`unshare -r -m`): un `/etc` temporal con passwd/shadow/cron escribibles, un `/usr/bin` bindeado con `python3` y `find` SUID. Los bits SUID solo dan el root mapeado del namespace — nunca el tuyo. Es la forma más segura de demostrar, testear y capturar el ciclo completo escaneo → enumeración → root sin Docker ni permisos especiales:
+
+```bash
+lab/rootless_lab.sh                             # solo escaneo
+lab/rootless_lab.sh --exploit --dry-run         # muestra el plan
+lab/rootless_lab.sh --exploit --risk=danger     # escalada completa hasta uid=0
+lab/rootless_lab.sh --shell                     # shell interactiva del namespace
+```
+
+## Testing con Docker
+
+Cuatro contenedores cubren la matriz: `vulnerable` (debe encontrar vectores), `clean` (no debe encontrar ninguno), `edgecases` (permisos raros, symlinks) y `autoprivilege-test` (ejecuta la suite completa):
+
+```bash
+cd docker && docker compose up --build
 ./docker/test_runner.sh
 ```
 
-Tres objetivos: **vulnerable** (10 fallos deliberados), **clean** (línea base — debe dar cero falsos positivos), **edgecases** (configuraciones tramposas).
+## Seguridad y ética
 
----
+AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas, laboratorios, CTFs y engagements con permiso por escrito. Por defecto no cambia nada; la explotación solo ocurre tras `--exploit`, e incluso así prefiere técnicas reversibles y se detiene en el riesgo que permitiste. No lo ejecutes en sistemas que no poseas o no tengas autorización explícita para auditar.
 
-# 🎯 Base de Datos GTFOBins
+## Tests y CI
 
-**75 técnicas embebidas en el binario** — cero llamadas de red en ejecución, funciona en sistemas aislados.
+23 tests unitarios cubren a propósito las partes delicadas: el arte del banner se verifica decodificándolo rune a rune (se acabaron los ASCII art mal escritos), parseo CSV de vectores, ordenación por riesgo, rangos de CVEs de kernel, rangos de versiones de sudo, timeouts de explotación, regresiones de quoting de shell, guards de spool, formatos de hash y escapado de markdown. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
 
-<details>
-<summary><b>Binarios soportados</b></summary>
+## Licencia
 
-**Shell SUID (31):** bash, dash, fish, ksh, lua, lua5.3, lua5.4, node, nodejs, perl, perl5, php, php5, php7, php8, php8.1, php8.2, python, python2, python3, python3.8–3.13, ruby, ruby2, ruby3, sh, zsh
-
-**sudo (44):** apache2, awk, cpan, docker, ed, env, ex, find, ftp, gawk, gdb, gem, git, journalctl, less, lxc, make, man, more, mysql, nawk, nice, nmap, npm, pip, pip3, psql, rsync, scp, sed, socat, sqlite3, ssh, stdbuf, systemctl, tar, tcpdump, timeout, unzip, vi, vim, wall, watch, zip
-
-</details>
-
-`--update-gtfobins` descarga el GTFOBins upstream, fusiona entradas nuevas y **las persiste** en `~/.autoprivilege/gtfobins.json` (se cargan solas en la siguiente ejecución).
-
----
-
-# 📤 Formatos de Salida
-
-**JSON** (`--json`) — stdout limpio, colores desactivados, seguro para pipes:
-
-```json
-{
-  "tool": "Auto-Privilege",
-  "version": "1.1.0",
-  "host": "objetivo",
-  "user": "operador",
-  "timestamp": "2026-09-11T10:30:00Z",
-  "duration_ms": 1420,
-  "rooted": false,
-  "findings": [ { "source": "SUID", "target": "/usr/bin/find", "risk": "LOW", "exploitable": true } ],
-  "vectors":  [ { "name": "SUID find", "command": "find . -exec /bin/sh -p \\; -quit" } ]
-}
-```
-
-**Markdown** (`--report auditoria.md`) — tabla de hallazgos + cada vector con su comando exacto, listo para adjuntar a un informe de auditoría.
-
----
-
-# 🧠 Arquitectura
-
-```mermaid
-flowchart LR
-    A["🎯 Sistema Objetivo"] --> B["🔍 Fase 1 · Scan<br/>15 escáneres de solo lectura"]
-    B --> C["🗂️ Fase 2 · Enumerate<br/>hallazgos × GTFOBins(75)"]
-    C --> D{"¿Vector?"}
-    D -->|auto| E["⚡ Fase 3 · Exploit<br/>seguro primero, techo de riesgo"]
-    D -->|manual| F["📋 Imprime el comando exacto"]
-    E --> G{"¿root?"}
-    G -->|sí| H["💀 Informe + resumen"]
-    G -->|no| E
-```
-
-```
-Auto-Privilege/
-├── main.go                 entrada CLI + orquestación + códigos de salida
-├── ui.go                   banner, ayuda, plan dry-run, resumen, lista GTFOBins
-├── report.go               informe JSON + informe markdown de evidencias
-├── scanner.go              15 escáneres de solo lectura (+ heurísticas honestas)
-├── enumerate.go            hallazgos → vectores (auto + manual)
-├── exploit.go              motor de ejecución (seguro primero, interactivo/capturado)
-├── gtfobins.go             base GTFOBins embebida (75 entradas)
-├── gtfobins_update.go      actualización upstream con persistencia real
-├── logger.go               diagnósticos en stderr (text/json)
-├── universe.go             tipos, niveles de riesgo, colores TTY-aware
-├── autoprivilege_test.go   20+ tests unitarios (decodificación del banner, parseo…)
-├── lab/rootless_lab.sh     lab de demo rootless (namespace de usuario)
-├── docker/                 objetivos vulnerable / clean / edgecases + runner
-└── docs/images/            banner + GIF demo (sesiones reales)
-```
-
----
-
-# 📊 Niveles de Riesgo
-
-| Nivel | Ejemplos | ¿Auto-explota? | ¿Toca el FS? |
-|-------|----------|:---:|:---:|
-| 🟢 **SAFE** | SUID GTFOBins → shell | ✅ por defecto | No |
-| 🔵 **LOW** | `find -exec` SUID | ✅ con `--risk=low` | No |
-| 🟠 **MEDIUM** | cap_setuid, heurísticas de kernel | ✅ con `--risk=medium` | No |
-| 🔴 **HIGH** | inyección cron, escritura passwd, docker | ✅ con `--risk=high` | Sí |
-| 💀 **DANGER** | sobrescribir shadow | 📋 solo manual | Sí, arriesgado |
-
----
-
-<div align="center">
-  <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,6&height=110&section=footer&text=Un%20binario.%20Un%20disparo.%20Root.&fontSize=22&fontColor=fff&animation=twinkling" width="100%"/>
-  <br/><br/>
-  <sub>Hecho con ❤️ por <a href="https://github.com/Ruby570bocadito">Ruby570bocadito</a> · © 2026 · Licencia MIT</sub>
-</div>
+MIT — ver [LICENSE](LICENSE).

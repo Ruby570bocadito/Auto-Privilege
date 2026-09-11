@@ -120,7 +120,6 @@ func TestBannerArtSpellsAutoPriv(t *testing.T) {
 		"U": {"██╗   ██╗", "██║   ██║", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "},
 		"T": {"████████╗", "╚══██╔══╝", "   ██║   ", "   ██║   ", "   ██║   ", "   ╚═╝   "},
 		"O": {" ██████╗ ", "██╔═══██╗", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "},
-		"-": {"█████╗", "╚════╝", "      ", "      ", "      ", "      "},
 		"P": {"██████╗ ", "██╔══██╗", "██████╔╝", "██╔═══╝ ", "██║     ", "╚═╝     "},
 		"R": {"██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"},
 		"I": {"██╗", "██║", "██║", "██║", "██║", "╚═╝"},
@@ -157,8 +156,8 @@ func TestBannerArtSpellsAutoPriv(t *testing.T) {
 			t.Fatalf("undecodable rune column at %d — banner art corrupted", x)
 		}
 	}
-	if decoded != "AUTO-PRIV" {
-		t.Errorf("banner decodes to %q, want AUTO-PRIV", decoded)
+	if decoded != "AUTOPRIV" {
+		t.Errorf("banner decodes to %q, want AUTOPRIV", decoded)
 	}
 }
 

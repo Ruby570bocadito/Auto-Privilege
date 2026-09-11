@@ -8,20 +8,27 @@ import (
 	"time"
 )
 
-// bannerArt spells AUTO-PRIV in ANSI Shadow (verified by unit test + generator
+// bannerArt spells AUTOPRIV in ANSI Shadow (verified by unit test + generator
 // script round-trip decode: scripts/gen_ap_banner.py).
 var bannerArt = []string{
-	" █████╗ ██╗   ██╗████████╗ ██████╗ █████╗██████╗ ██████╗ ██╗██╗   ██╗",
-	"██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗╚════╝██╔══██╗██╔══██╗██║██║   ██║",
-	"███████║██║   ██║   ██║   ██║   ██║      ██████╔╝██████╔╝██║██║   ██║",
-	"██╔══██║██║   ██║   ██║   ██║   ██║      ██╔═══╝ ██╔══██╗██║╚██╗ ██╔╝",
-	"██║  ██║╚██████╔╝   ██║   ╚██████╔╝      ██║     ██║  ██║██║ ╚████╔╝ ",
-	"╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝       ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝  ",
+	" █████╗ ██╗   ██╗████████╗ ██████╗ ██████╗ ██████╗ ██╗██╗   ██╗",
+	"██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██║██║   ██║",
+	"███████║██║   ██║   ██║   ██║   ██║██████╔╝██████╔╝██║██║   ██║",
+	"██╔══██║██║   ██║   ██║   ██║   ██║██╔═══╝ ██╔══██╗██║╚██╗ ██╔╝",
+	"██║  ██║╚██████╔╝   ██║   ╚██████╔╝██║     ██║  ██║██║ ╚████╔╝ ",
+	"╚═╝  ╚═╝ ╚═════╝    ╚═╝    ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝  ",
 }
 
 // bannerColor applies a cyan→green 256-color ramp per line.
 func bannerColor(i int) string {
-	ramp := []string{"\033[38;5;51m", "\033[38;5;50m", "\033[38;5;48m", "\033[38;5;47m", "\033[38;5;46m", "\033[38;5;46m"}
+	ramp := []string{
+		"\x1b[38;5;51m", // cyan
+		"\x1b[38;5;50m",
+		"\x1b[38;5;49m",
+		"\x1b[38;5;48m",
+		"\x1b[38;5;47m",
+		"\x1b[38;5;46m", // green
+	}
 	if i < 0 || i >= len(ramp) {
 		return AnsiCyan
 	}
@@ -45,7 +52,7 @@ func printBanner(opts Options) {
 }
 
 func usage() {
-	out := `  AUTO-PRIV v` + Version + ` — automated linux privilege escalation
+	out := `  AUTOPRIV v` + Version + ` — automated linux privilege escalation
 
   Usage: autoprivilege [options]
 
