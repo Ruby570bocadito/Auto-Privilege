@@ -155,7 +155,7 @@ func updateGTFOBins(opts Options) error {
 		}
 	}
 
-	newEntries := 0
+	newMain, newSgid := 0, 0
 	for name, entry := range bins {
 		entryMap, ok := entry.(map[string]interface{})
 		if !ok {
@@ -174,7 +174,7 @@ func updateGTFOBins(opts Options) error {
 				gtfoLookup[name] = captured.MainCmd
 				gtfoCategory[name] = map[bool]string{true: "suid-shell", false: "sudo"}[captured.MainIsShell]
 				suidShellBins[name] = captured.MainIsShell
-				newEntries++
+				newMain++
 			}
 			if se.Cmd == "" {
 				se.Cmd = captured.MainCmd
@@ -184,7 +184,7 @@ func updateGTFOBins(opts Options) error {
 		if captured.SgidCmd != "" {
 			if _, exists := sgidLookup[name]; !exists {
 				sgidLookup[name] = captured.SgidCmd
-				newEntries++
+				newSgid++
 			}
 			if se.SgidCmd == "" {
 				se.SgidCmd = captured.SgidCmd
@@ -194,6 +194,10 @@ func updateGTFOBins(opts Options) error {
 			stored[name] = se
 		}
 	}
+
+	// R31: main and sgid techniques are counted separately — new_entries
+	// keeps its original (main-only) semantics and new_sgid_entries adds
+	// the sgid slice, so an operator can tell what each refresh brought.
 
 	// Persist so future runs load the refreshed database.
 	saved := "not persisted (no home dir)"
@@ -207,16 +211,17 @@ func updateGTFOBins(opts Options) error {
 	}
 
 	updateInfo := GTFOBinsUpdate{
-		LastUpdate: time.Now().Format(time.RFC3339),
-		Entries:    len(gtfoLookup),
-		NewEntries: newEntries,
+		LastUpdate:     time.Now().Format(time.RFC3339),
+		Entries:        len(gtfoLookup),
+		NewEntries:     newMain,
+		NewSgidEntries: newSgid,
 	}
 
 	if opts.LogFormat == "json" {
 		infoData, _ := marshalJSON(updateInfo)
 		fmt.Println(string(infoData))
 	} else if !opts.Quiet {
-		fmt.Printf(colorize("  [+] GTFOBins updated: %d new entries, %d total\n", AnsiGreen), newEntries, len(gtfoLookup))
+		fmt.Printf(colorize("  [+] GTFOBins updated: %d new entries (+%d sgid), %d total\n", AnsiGreen), newMain, newSgid, len(gtfoLookup))
 		fmt.Printf(colorize("  [+] Database saved to: %s\n", AnsiGrey), saved)
 	}
 
@@ -224,9 +229,10 @@ func updateGTFOBins(opts Options) error {
 }
 
 type GTFOBinsUpdate struct {
-	LastUpdate string `json:"last_update"`
-	Entries    int    `json:"entries"`
-	NewEntries int    `json:"new_entries"`
+	LastUpdate     string `json:"last_update"`
+	Entries        int    `json:"entries"`
+	NewEntries     int    `json:"new_entries"`
+	NewSgidEntries int    `json:"new_sgid_entries"`
 }
 
 func cleanGTFOCmd(cmd, bin string) string {

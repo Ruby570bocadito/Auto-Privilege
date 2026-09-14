@@ -1264,3 +1264,50 @@ func TestCanonicalSocketPathsDedupsAliasedSockets(t *testing.T) {
 		t.Errorf("unresolvable paths must be preserved (Lstat decides later), got %v", got2)
 	}
 }
+
+// --- Ronda 5: Dirty Cow range, updater counter split ---
+
+func TestKernelInRangeDirtyCowBoundaries(t *testing.T) {
+	// CVE-2016-5195 window: [2.6.22, 4.8.3] — the canonical legacy/CTF vector.
+	minV := []int{2, 6, 22}
+	maxV := []int{4, 8, 3}
+	cases := []struct {
+		ver  []int
+		want bool
+	}{
+		{[]int{2, 6, 21}, false}, // one below the window
+		{[]int{2, 6, 22}, true},  // exact lower bound
+		{[]int{3, 10, 0}, true},  // classic CentOS 7 era
+		{[]int{4, 4, 25}, true},  // backport-era LTS still in window
+		{[]int{4, 8, 3}, true},   // exact upper bound
+		{[]int{4, 8, 4}, false},  // fixed release
+		{[]int{5, 10, 0}, false}, // modern kernel — must never fire
+	}
+	for _, tc := range cases {
+		if got := kernelInRange(tc.ver, minV, maxV); got != tc.want {
+			t.Errorf("kernelInRange(%v, DirtyCow) = %v, want %v", tc.ver, got, tc.want)
+		}
+	}
+}
+
+func TestGTFOUpdateJSONShapeKeepsBothCounters(t *testing.T) {
+	// R31: new_entries keeps its original main-only semantics and
+	// new_sgid_entries carries the sgid slice — both keys must exist so the
+	// JSON contract stays parseable for downstream tooling.
+	data, err := marshalJSON(GTFOBinsUpdate{LastUpdate: "t", Entries: 75, NewEntries: 3, NewSgidEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe map[string]interface{}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"last_update", "entries", "new_entries", "new_sgid_entries"} {
+		if _, ok := probe[key]; !ok {
+			t.Errorf("GTFOBinsUpdate JSON missing key %q", key)
+		}
+	}
+	if probe["new_entries"].(float64) != 3 || probe["new_sgid_entries"].(float64) != 1 {
+		t.Errorf("counters must not be merged: got %v", probe)
+	}
+}

@@ -10,7 +10,7 @@ Un binario Go. Cero dependencias. Resultados honestos.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-58%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-60%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
@@ -125,37 +125,48 @@ Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ej
 | `nfs` | exports no_root_squash | manual |
 | `path` | directorios escribibles en el PATH de root | sí |
 | `service` | unidades systemd escribibles / secuestro PathChanged | sí |
-| `kernel` | CVEs por rango de kernel: Dirty Pipe, OverlayFS, StackRot, nf_tables; PwnKit vía pkexec | parcial |
+| `kernel` | CVEs por rango de kernel: Dirty Pipe, Dirty Cow, OverlayFS, StackRot, nf_tables; PwnKit vía pkexec | parcial |
 | `cred` | contraseñas en history, configs, metadata cloud (imds, timeout 800 ms) | sí |
 
 `parcial` significa que AUTOPRIV prepara el terreno (checks de versión, parseo de reglas) pero un humano confirma el paso final — la herramienta lo dice en vez de fingirlo.
 
+Los sondeos `docker`/`container` heredan el entorno de tu shell, así que un daemon configurado vía `DOCKER_HOST` (remoto o local) cuenta como alcanzable — el hallazgo dice "verify rootful vs rootless" porque un daemon rootless contiene el breakout clásico.
+
 ## Formatos de salida
 
-**Terminal** — hallazgos coloreados con evidencia por línea y resumen final:
+**Terminal** — hallazgos coloreados con evidencia por línea y resumen final (salida real del laboratorio rootless; dentro del user namespace la herramienta arranca como root mapeado, por eso `rooted YES`):
 
 ```
-[!] CRON → Writable cron job — inject command (/etc/cron.d/backup)
-[+] SUID → SUID binary: find (GTFOBins: true) (/usr/bin/find)
+  ── Findings ──
+  [.] SUID → SUID binary: find (GTFOBins: true) (/usr/bin/find)
+  [!] SUID → SUID binary: python3.13 (GTFOBins: true) (/usr/bin/python3.13)
+  [!] CRON → Writable cron job — inject command (/etc/cron.d/backup)
+  [!] FILE → Writable /etc/passwd — inject root user (/etc/passwd)
+  [!] FILE → Readable /etc/shadow — crack root hash (/etc/shadow)
+  [*] FILE → Writable /etc/shadow — set root password (/etc/shadow)
+  [~] CAPS → Process holds CAP_SETUID — can become root in-process (cap_setuid)
+  [!] SERVICE → Writable systemd service — hijack execution (/etc/systemd/system/vuln.service)
 
-Summary — 9 exploitable
-  vectors  9  (auto 6 · manual 3)
-  risks    LOW 1  MEDIUM 1  HIGH 6  DANGER 1
-  rooted   NO
+  ── Summary ─────────────────────────────
+   findings   12  (exploitable 9)
+   vectors    9  (auto 6 · manual 3)
+   risks      LOW 3  MEDIUM 1  HIGH 7  DANGER 1
+   rooted     YES
+   time       1.7s
 ```
 
-**JSON** (`--json`) — un objeto en stdout, listo para `jq`:
+**JSON** (`--json`) — un objeto en stdout, listo para `jq` (el progreso del lab va a stderr, así que el pipe queda limpio):
 
 ```bash
-$ autoprivilege --json | jq '.summary'
+$ lab/rootless_lab.sh --json --quiet | jq '.summary'
 {
-  "findings": 11,
-  "exploitable": 2,
-  "vectors": 2,
-  "auto": 0,
-  "manual": 2,
-  "risks": { "MEDIUM": 9, "HIGH": 2 },
-  "rooted": false
+  "findings": 12,
+  "exploitable": 9,
+  "vectors": 9,
+  "auto": 6,
+  "manual": 3,
+  "risks": { "DANGER": 1, "HIGH": 7, "LOW": 3, "MEDIUM": 1 },
+  "rooted": true
 }
 ```
 
@@ -187,7 +198,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-58 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins y el fichero JSON de `--output` (forma y permisos 0600). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
+60 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins y el fichero JSON de `--output` (forma y permisos 0600). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
 
 ## Licencia
 

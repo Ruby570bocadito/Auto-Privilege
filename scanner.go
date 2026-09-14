@@ -845,6 +845,19 @@ func scanKernelCVE(p *AutoPrivilege) {
 			risk: RiskHigh,
 		},
 		{
+			// The canonical legacy/CTF vector: the fix landed in
+			// 4.8.3 (also backported to 4.7.9 and 4.4.26), so the
+			// conservative window is 2.6.22 through 4.8.3 — on
+			// any modern kernel this never fires, which keeps it
+			// free of noise (R29).
+			cve:  "CVE-2016-5195",
+			name: "Dirty Cow",
+			desc: "mm/gup race in copy-on-write — write to read-only mappings, root any legacy host",
+			minV: []int{2, 6, 22},
+			maxV: []int{4, 8, 3},
+			risk: RiskHigh,
+		},
+		{
 			cve:  "CVE-2023-0386",
 			name: "OverlayFS",
 			desc: "overlayfs copy-up permission bypass — file ownership escalation",

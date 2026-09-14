@@ -21,10 +21,10 @@ BIN=/tmp/autoprivilege
 
 command -v unshare >/dev/null || { echo "unshare not available"; exit 1; }
 
-echo "[lab] building binary..."
+echo "[lab] building binary..." >&2
 ( cd "$PROJECT_DIR" && go build -o "$BIN" . )
 
-echo "[lab] staging fake vulnerable system..."
+echo "[lab] staging fake vulnerable system..." >&2
 STAGE=$(mktemp -d /tmp/ap-lab.XXXXXX)
 mkdir -p "$STAGE/etc/cron.d" "$STAGE/etc/systemd/system" "$STAGE/bin" "$STAGE/local"
 
@@ -54,7 +54,7 @@ trap cleanup EXIT
 # path now and reconnect the tool's stdin to it inside the namespace.
 TTY_PATH="$(tty)" 2>/dev/null || TTY_PATH=""
 
-echo "[lab] entering user namespace (mapped root, no real privileges)..."
+echo "[lab] entering user namespace (mapped root, no real privileges)..." >&2
 export OUTER_TTY="${TTY_PATH:-/dev/null}"
 unshare -r -m bash -s "$BIN" "$@" <<EOF
 set -euo pipefail
@@ -75,7 +75,7 @@ cd /tmp
 if [ "\${1:-}" = "--shell" ]; then
     export HOME=/tmp
     if [ "$OUTER_TTY" = "/dev/null" ]; then
-        echo "[lab] --shell needs a terminal"
+        echo "[lab] --shell needs a terminal" >&2
         exit 1
     fi
     exec bash --noprofile --norc -i < "$OUTER_TTY"
