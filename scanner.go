@@ -523,6 +523,17 @@ func scanContainers(p *AutoPrivilege) {
 		}
 	}
 	if len(evidence) > 0 {
+		// Host init environment (R35): in a shared PID namespace,
+		// /proc/1 is the host init and its environ is a credential
+		// prize when readable. Only probed when other container
+		// evidence exists — on bare metal the host init's environ is
+		// readable to root and would fabricate a false container
+		// signal. The CONTENT is never printed: only the readability
+		// is declared. Permission-denied is the common case and
+		// stays silent.
+		if _, err := os.ReadFile("/proc/1/environ"); err == nil {
+			evidence = append(evidence, "host init environment readable (/proc/1/environ)")
+		}
 		risk := RiskMedium
 		if privileged {
 			// Honest escalation ladder: privileged = breakout is

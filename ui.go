@@ -66,7 +66,7 @@ func usage() {
 
   Targeting:
     --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
-                              docker,container,caps,nfs,path,service,kernel,cred
+                              docker,container,caps,nfs,path,service,kernel,cred,all
     --risk level              max auto-exploit risk: safe|low|medium|high|danger
     --one-shot                stop after the first successful exploit
     --lhost ip                reverse-shell listener host (auto-detected)

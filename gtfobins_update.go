@@ -215,6 +215,7 @@ func updateGTFOBins(opts Options) error {
 		Entries:        len(gtfoLookup),
 		NewEntries:     newMain,
 		NewSgidEntries: newSgid,
+		EntriesSgid:    len(sgidLookup),
 	}
 
 	if opts.LogFormat == "json" {
@@ -233,6 +234,7 @@ type GTFOBinsUpdate struct {
 	Entries        int    `json:"entries"`
 	NewEntries     int    `json:"new_entries"`
 	NewSgidEntries int    `json:"new_sgid_entries"`
+	EntriesSgid    int    `json:"entries_sgid"`
 }
 
 func cleanGTFOCmd(cmd, bin string) string {

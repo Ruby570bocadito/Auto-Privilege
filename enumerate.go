@@ -20,24 +20,36 @@ var validVectors = map[string]bool{
 }
 
 // parseVectorList splits and validates a comma-separated --vector argument.
+// "all" is an alias (R34) that expands to every valid vector in sorted
+// order — an alias, never a new category: it can only expand into names
+// that already exist in validVectors, so it cannot smuggle an unknown one.
 func parseVectorList(s string) ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
-	for _, part := range strings.Split(s, ",") {
-		name := strings.ToLower(strings.TrimSpace(part))
-		if name == "" {
-			continue
-		}
-		if !validVectors[name] {
-			return nil, fmt.Errorf("unknown vector %q (valid: %s)", name, vectorNames())
-		}
+	add := func(name string) {
 		if !seen[name] {
 			seen[name] = true
 			out = append(out, name)
 		}
 	}
+	for _, part := range strings.Split(s, ",") {
+		name := strings.ToLower(strings.TrimSpace(part))
+		if name == "" {
+			continue
+		}
+		if name == "all" {
+			for _, v := range strings.Split(vectorNames(), ",") {
+				add(v)
+			}
+			continue
+		}
+		if !validVectors[name] {
+			return nil, fmt.Errorf("unknown vector %q (valid: %s,all)", name, vectorNames())
+		}
+		add(name)
+	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("empty --vector list (valid: %s)", vectorNames())
+		return nil, fmt.Errorf("empty --vector list (valid: %s,all)", vectorNames())
 	}
 	return out, nil
 }

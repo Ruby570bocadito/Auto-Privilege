@@ -10,7 +10,7 @@ One Go binary. Zero dependencies. Honest results.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-60%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-62%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
@@ -84,7 +84,7 @@ Modes:
 
 Targeting:
   --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
-                            docker,container,caps,nfs,path,service,kernel,cred
+                            docker,container,caps,nfs,path,service,kernel,cred,all
   --risk level              max auto-exploit risk: safe|low|medium|high|danger
   --one-shot                stop after the first successful exploit
   --lhost ip                reverse-shell listener host (auto-detected)
@@ -198,7 +198,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-60 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence and the `--output` JSON file (shape and 0600 perms). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
+62 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence and the `--output` JSON file (shape and 0600 perms). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
 
 ## License
 

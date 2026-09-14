@@ -1311,3 +1311,58 @@ func TestGTFOUpdateJSONShapeKeepsBothCounters(t *testing.T) {
 		t.Errorf("counters must not be merged: got %v", probe)
 	}
 }
+
+// --- Ronda 6: alias --vector all, entries_sgid total ---
+
+func TestParseVectorListAllAlias(t *testing.T) {
+	got, err := parseVectorList("all")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != len(validVectors) {
+		t.Fatalf("all must expand to %d valid vectors, got %d", len(validVectors), len(got))
+	}
+	seen := map[string]bool{}
+	for _, v := range got {
+		if !validVectors[v] {
+			t.Errorf("expansion produced non-valid vector %q", v)
+		}
+		if seen[v] {
+			t.Errorf("expansion produced duplicate %q", v)
+		}
+		seen[v] = true
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i-1] > got[i] {
+			t.Errorf("expansion must be sorted for determinism, got %v", got)
+			break
+		}
+	}
+	mixed, err := parseVectorList("sudo,all")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(mixed) != len(validVectors) {
+		t.Errorf("mixed list with all must still cover every valid vector once, got %v", mixed)
+	}
+	if _, err := parseVectorList("all,bogus"); err == nil {
+		t.Error("bogus after all must still error")
+	}
+}
+
+func TestGTFOUpdateJSONKeepsSgidTotal(t *testing.T) {
+	data, err := marshalJSON(GTFOBinsUpdate{Entries: 75, EntriesSgid: 31, NewEntries: 3, NewSgidEntries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe map[string]interface{}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := probe["entries_sgid"]; !ok {
+		t.Error("GTFOBinsUpdate JSON missing key entries_sgid (R33)")
+	}
+	if probe["entries_sgid"].(float64) != 31 {
+		t.Errorf("entries_sgid must carry the accumulated total, got %v", probe["entries_sgid"])
+	}
+}
