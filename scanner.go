@@ -35,6 +35,9 @@ func scanAll(p *AutoPrivilege) {
 }
 
 func addFinding(p *AutoPrivilege, source, target, desc string, risk RiskLevel, exploitable bool) {
+	// Findings are stored only: main() prints the consolidated "── Findings ──"
+	// section once, after the scan. Printing here too made every exploitable
+	// finding appear twice in terminal output.
 	p.Findings = append(p.Findings, Finding{
 		Source:      source,
 		Target:      target,
@@ -42,12 +45,28 @@ func addFinding(p *AutoPrivilege, source, target, desc string, risk RiskLevel, e
 		Risk:        risk,
 		Exploitable: exploitable,
 	})
-	if !p.Opts.JSON && !p.Opts.Quiet && exploitable {
-		p.Print(p.Findings[len(p.Findings)-1])
-	}
 }
 
 // --- SUID ---
+// classifySUID decides whether a SUID binary is a root-escalation vector.
+// The setuid bit only helps if the file is owned by root: a SUID binary
+// owned by another user escalates to that user, never to uid 0. Without
+// this check the scanner produced false positives for every stray SUID bin.
+func classifySUID(bin string, ownerUID uint32) (risk RiskLevel, exploitable bool) {
+	if ownerUID != 0 {
+		return RiskLow, false
+	}
+	_, isGTFO := getCommand(bin)
+	isShell := isSuidShellBin(bin)
+	if !isGTFO && !isShell {
+		return RiskLow, false
+	}
+	if isShell {
+		return RiskHigh, true
+	}
+	return RiskLow, true
+}
+
 func scanSUID(p *AutoPrivilege) {
 	// Common SUID paths
 	paths := []string{
@@ -74,20 +93,27 @@ func scanSUID(p *AutoPrivilege) {
 			if info.Mode()&os.ModeSetuid != 0 && !info.Mode().IsDir() && info.Mode().IsRegular() {
 				seen[e.Name()] = true
 				bin := e.Name()
-				risk := RiskMedium
 
-				_, isGTFO := getCommand(bin)
-				isShell := isSuidShellBin(bin)
-
-				if isShell {
-					risk = RiskHigh
-				} else if isGTFO {
-					risk = RiskLow
+				var ownerUID uint32
+				if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+					ownerUID = stat.Uid
 				}
-
+				risk, exploitable := classifySUID(bin, ownerUID)
+				if !exploitable {
+					// Kept as informational intel (never printed, counted in
+					// JSON) with the reason spelled out instead of a bare
+					// "GTFOBins: false" — non-root-owned bins are not root
+					// vectors at all.
+					desc := fmt.Sprintf("SUID binary: %s (GTFOBins: false)", bin)
+					if ownerUID != 0 {
+						desc = fmt.Sprintf("SUID binary: %s (owner uid %d — not a root vector)", bin, ownerUID)
+					}
+					addFinding(p, "SUID", full, desc, RiskLow, false)
+					continue
+				}
 				addFinding(p, "SUID", full,
-					fmt.Sprintf("SUID binary: %s (GTFOBins: %v)", bin, isGTFO || isShell),
-					risk, isGTFO || isShell)
+					fmt.Sprintf("SUID binary: %s (GTFOBins: true)", bin),
+					risk, true)
 			}
 		}
 	}
@@ -425,6 +451,12 @@ func scanWritablePath(p *AutoPrivilege) {
 
 // isWritableByCurrentUser checks if the current user/group can write to a file
 func isWritableByCurrentUser(path string) bool {
+	// Root (euid 0) bypasses the permission bits entirely — the old code
+	// returned false for root-owned 0444 files, which root can obviously
+	// still write.
+	if os.Geteuid() == 0 {
+		return true
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return false

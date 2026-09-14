@@ -10,7 +10,7 @@ One Go binary. Zero dependencies. Honest results.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-23%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-28%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
@@ -100,6 +100,7 @@ Output:
 
 Misc:
   --stealth                 jitter between scanners and exploits
+  --rooteame path           load .ko module if root is obtained (lab only)
   --version                 print version
   -h, --help                this help
 ```
@@ -142,8 +143,16 @@ Summary — 9 exploitable
 **JSON** (`--json`) — one object on stdout, ready for `jq`:
 
 ```bash
-$ autoprivilege --json --quiet | jq '.summary'
-{ "vectors": 9, "auto": 6, "manual": 3, "rooted": false }
+$ autoprivilege --json | jq '.summary'
+{
+  "findings": 11,
+  "exploitable": 2,
+  "vectors": 2,
+  "auto": 0,
+  "manual": 2,
+  "risks": { "MEDIUM": 9, "HIGH": 2 },
+  "rooted": false
+}
 ```
 
 **Markdown** (`--report audit.md`) — per-vector sections with the command, the risk and the evidence lines, suitable for an engagement appendix.
@@ -174,7 +183,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-23 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping. CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
+28 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping. CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
 
 ## License
 

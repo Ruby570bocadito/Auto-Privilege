@@ -10,7 +10,7 @@ Un binario Go. Cero dependencias. Resultados honestos.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-23%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-28%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
@@ -100,6 +100,7 @@ Salida:
 
 Varios:
   --stealth                 jitter entre escáneres y exploits
+  --rooteame ruta           carga un módulo .ko al conseguir root (solo lab)
   --version                 imprime versión
   -h, --help                esta ayuda
 ```
@@ -142,8 +143,16 @@ Summary — 9 exploitable
 **JSON** (`--json`) — un objeto en stdout, listo para `jq`:
 
 ```bash
-$ autoprivilege --json --quiet | jq '.summary'
-{ "vectors": 9, "auto": 6, "manual": 3, "rooted": false }
+$ autoprivilege --json | jq '.summary'
+{
+  "findings": 11,
+  "exploitable": 2,
+  "vectors": 2,
+  "auto": 0,
+  "manual": 2,
+  "risks": { "MEDIUM": 9, "HIGH": 2 },
+  "rooted": false
+}
 ```
 
 **Markdown** (`--report audit.md`) — secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
@@ -174,7 +183,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-23 tests unitarios cubren a propósito las partes delicadas: el arte del banner se verifica decodificándolo rune a rune (se acabaron los ASCII art mal escritos), parseo CSV de vectores, ordenación por riesgo, rangos de CVEs de kernel, rangos de versiones de sudo, timeouts de explotación, regresiones de quoting de shell, guards de spool, formatos de hash y escapado de markdown. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
+28 tests unitarios cubren a propósito las partes delicadas: el arte del banner se verifica decodificándolo rune a rune (se acabaron los ASCII art mal escritos), parseo CSV de vectores, ordenación por riesgo, rangos de CVEs de kernel, rangos de versiones de sudo, timeouts de explotación, regresiones de quoting de shell, guards de spool, formatos de hash y escapado de markdown. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
 
 ## Licencia
 

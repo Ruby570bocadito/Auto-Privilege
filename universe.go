@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 type RiskLevel int
 
@@ -157,10 +157,9 @@ func colorize(text, color string) string {
 }
 
 func (p *AutoPrivilege) Print(finding Finding) {
-	if p.Opts.JSON {
-		return
-	}
-	if p.Opts.Quiet && !finding.Exploitable {
+	// --quiet means NO output (the contract behind "exit code only"): the old
+	// partial check let exploitable findings leak to the terminal.
+	if p.Opts.JSON || p.Opts.Quiet {
 		return
 	}
 

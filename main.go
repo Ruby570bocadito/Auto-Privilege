@@ -51,8 +51,12 @@ func main() {
 		}
 	}
 
-	// FASE 3: Exploit
-	if p.Opts.Exploit && p.Opts.DryRun {
+	// FASE 3: Exploit (or show the plan)
+	// --dry-run shows the execution plan on its own: the usage text and
+	// both READMEs promise "scan + enumerate, show what would run", but
+	// the old condition required --exploit --dry-run together, so a lone
+	// --dry-run silently skipped the plan.
+	if p.Opts.DryRun {
 		printDryRunPlan(p)
 		logDryRun(p.Opts)
 	} else if p.Opts.Exploit {

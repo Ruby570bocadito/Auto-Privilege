@@ -1,0 +1,42 @@
+name: Release
+
+# Builds the static linux binaries the README promises (amd64 / arm64) and
+# attaches them to the GitHub release for the pushed tag:
+#   git tag v1.2.0 && git push origin v1.2.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Test before shipping
+        run: go test -count=1 ./...
+
+      - name: Build linux amd64 (static)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o autoprivilege-linux-amd64 .
+
+      - name: Build linux arm64 (static)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o autoprivilege-linux-arm64 .
+
+      - name: Smoke test the amd64 binary
+        run: ./autoprivilege-linux-amd64 --version
+
+      - name: Attach binaries to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            autoprivilege-linux-amd64
+            autoprivilege-linux-arm64
+          generate_release_notes: true

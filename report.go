@@ -7,19 +7,59 @@ import (
 	"time"
 )
 
+// jsonSummary is the at-a-glance counts block of the machine-readable report.
+// It lives under the "summary" key of the --json output — the shape both
+// READMEs document for `jq '.summary'`.
+type jsonSummary struct {
+	Findings    int            `json:"findings"`
+	Exploitable int            `json:"exploitable"`
+	Vectors     int            `json:"vectors"`
+	Auto        int            `json:"auto"`
+	Manual      int            `json:"manual"`
+	Risks       map[string]int `json:"risks"`
+	Rooted      bool           `json:"rooted"`
+}
+
+// buildSummary aggregates findings and vectors into a jsonSummary. Risk
+// buckets with zero hits are omitted so the JSON matches the terminal
+// summary; Risks is never nil so it renders as {} instead of null.
+func buildSummary(p *AutoPrivilege) jsonSummary {
+	s := jsonSummary{
+		Findings: len(p.Findings),
+		Vectors:  len(p.Vectors),
+		Rooted:   p.Rooted || isRoot(),
+		Risks:    map[string]int{},
+	}
+	for _, f := range p.Findings {
+		if f.Exploitable {
+			s.Exploitable++
+		}
+		s.Risks[f.Risk.String()]++
+	}
+	for _, v := range p.Vectors {
+		if v.Exploit == nil {
+			s.Manual++
+		} else {
+			s.Auto++
+		}
+	}
+	return s
+}
+
 // jsonReport is the enriched machine-readable document printed by --json.
 type jsonReport struct {
-	Tool       string    `json:"tool"`
-	Version    string    `json:"version"`
-	Host       string    `json:"host"`
-	User       string    `json:"user"`
-	GOOS       string    `json:"goos"`
-	GOArch     string    `json:"goarch"`
-	Timestamp  time.Time `json:"timestamp"`
-	DurationMS int64     `json:"duration_ms"`
-	Rooted     bool      `json:"rooted"`
-	Findings   []Finding `json:"findings"`
-	Vectors    []Vector  `json:"vectors"`
+	Tool       string      `json:"tool"`
+	Version    string      `json:"version"`
+	Host       string      `json:"host"`
+	User       string      `json:"user"`
+	GOOS       string      `json:"goos"`
+	GOArch     string      `json:"goarch"`
+	Timestamp  time.Time   `json:"timestamp"`
+	DurationMS int64       `json:"duration_ms"`
+	Rooted     bool        `json:"rooted"`
+	Summary    jsonSummary `json:"summary"`
+	Findings   []Finding   `json:"findings"`
+	Vectors    []Vector    `json:"vectors"`
 }
 
 func buildReport(p *AutoPrivilege) jsonReport {
@@ -39,6 +79,7 @@ func buildReport(p *AutoPrivilege) jsonReport {
 		Timestamp:  time.Now().UTC(),
 		DurationMS: time.Since(p.Started).Milliseconds(),
 		Rooted:     p.Rooted || isRoot(),
+		Summary:    buildSummary(p),
 		Findings:   findings,
 		Vectors:    vectors,
 	}

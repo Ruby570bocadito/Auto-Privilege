@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// bannerArt spells AUTOPRIV in ANSI Shadow (verified by unit test + generator
-// script round-trip decode: scripts/gen_ap_banner.py).
+// bannerArt spells AUTOPRIV in ANSI Shadow. Correctness is enforced by
+// TestBannerArtSpellsAutoPriv, which round-trip decodes every rune column
+// against the glyph table, so a typo in the art fails CI.
 var bannerArt = []string{
 	" █████╗ ██╗   ██╗████████╗ ██████╗ ██████╗ ██████╗ ██╗██╗   ██╗",
 	"██╔══██╗██║   ██║╚══██╔══╝██╔═══██╗██╔══██╗██╔══██╗██║██║   ██║",
