@@ -10,7 +10,7 @@ One Go binary. Zero dependencies. Honest results.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-49%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-58%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
@@ -30,7 +30,7 @@ Everything is deliberate about its honesty. Vectors it cannot verify automatical
 | | |
 |---|---|
 | **16 read-only scanners** | SUID/SGID, sudo rules + version, writable cron, passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS, writable PATH dirs, systemd services, kernel CVEs, credentials in history/configs, cloud metadata |
-| **75 GTFOBins techniques** | embedded in the binary — works air-gapped; refreshable from upstream with one command |
+| **75 GTFOBins techniques + 31 sgid** | embedded in the binary — works air-gapped; refreshable from upstream with one command (`--list-gtfo` shows the sgid section) |
 | **Safest-first auto-exploit** | techniques sorted by risk, `--risk` cap, `--one-shot` stop at first root |
 | **Two output modes** | human terminal with truecolor ramp, or `--json` for machines (`--output file` persists it, 0600); optional markdown `--report` with evidence |
 | **Rootless demo lab** | `lab/rootless_lab.sh` builds a fake-vulnerable box inside a user namespace — no Docker, no real root, nothing touches your system |
@@ -114,13 +114,13 @@ Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error.
 | Vector | What it checks | Auto? |
 |---|---|---|
 | `suid` | SUID binaries (recursive walk) + GTFOBins match (`python3`, `find`, ...) | yes |
-| `sgid` | SGID binaries with root group — group-level escalation, manual vector | manual |
+| `sgid` | SGID binaries with root group — group-level escalation, manual vector (GTFOBins `sgid` technique preferred; SUID fallback declared in the note) | manual |
 | `sudo` | sudo -l rules, NOPASSWD entries, sudo version CVEs (Baron Samedit range) | partial |
 | `cron` | writable `/etc/cron*`, PATH cron jobs | yes |
 | `passwd` | writable `/etc/passwd` — root user injection | yes |
 | `shadow` | readable `/etc/shadow` — hash extraction | yes |
 | `docker` | docker group / socket access → host root | partial |
-| `container` | inside-container indicator, podman/containerd sockets, reachable docker daemon | partial |
+| `container` | inside-container indicator with privilege/PID-namespace evidence, podman/containerd sockets, reachable docker daemon | partial |
 | `caps` | cap_setuid processes, file capabilities (`getcap -r /`) | yes |
 | `nfs` | no_root_squash exports | manual |
 | `path` | writable dirs in root's PATH | yes |
@@ -187,7 +187,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-49 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors) and the `--output` JSON file (shape and 0600 perms). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
+58 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence and the `--output` JSON file (shape and 0600 perms). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
 
 ## License
 

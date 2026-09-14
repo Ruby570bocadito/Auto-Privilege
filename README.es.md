@@ -10,7 +10,7 @@ Un binario Go. Cero dependencias. Resultados honestos.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-49%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-58%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
@@ -30,7 +30,7 @@ Todo en ella es deliberadamente honesto. Los vectores que no puede verificar aut
 | | |
 |---|---|
 | **16 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible, inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS, directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud |
-| **75 técnicas GTFOBins** | embebidas en el binario — funciona air-gapped; actualizable desde upstream con un comando |
+| **75 técnicas GTFOBins + 31 sgid** | embebidas en el binario — funciona air-gapped; actualizable desde upstream con un comando (`--list-gtfo` muestra la sección sgid) |
 | **Auto-explotación de más seguro a más agresivo** | técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root |
 | **Dos modos de salida** | terminal humano con rampa de color, o `--json` para máquinas (`--output fichero` lo persiste, 0600); `--report` markdown opcional con evidencias |
 | **Laboratorio rootless** | `lab/rootless_lab.sh` monta una caja fake-vulnerable dentro de un user namespace — sin Docker, sin root real, no toca tu sistema |
@@ -114,13 +114,13 @@ Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ej
 | Vector | Qué comprueba | Auto? |
 |---|---|---|
 | `suid` | Binarios SUID (walk recursivo) + coincidencia GTFOBins (`python3`, `find`, ...) | sí |
-| `sgid` | Binarios SGID con grupo root — escalación de grupo, vector manual | manual |
+| `sgid` | Binarios SGID con grupo root — escalación de grupo, vector manual (técnica `sgid` de GTFOBins preferente; el fallback SUID se declara en la nota) | manual |
 | `sudo` | reglas sudo -l, entradas NOPASSWD, CVEs por versión de sudo (rango Baron Samedit) | parcial |
 | `cron` | `/etc/cron*` escribible, jobs cron con PATH | sí |
 | `passwd` | `/etc/passwd` escribible — inyección de usuario root | sí |
 | `shadow` | `/etc/shadow` legible — extracción de hashes | sí |
 | `docker` | grupo docker / acceso al socket → root del host | parcial |
-| `container` | indicador de contenedor actual, sockets podman/containerd, daemon docker alcanzable | parcial |
+| `container` | indicador del contenedor actual con evidencia de privilegio/namespace de PID, sockets podman/containerd, daemon docker alcanzable | parcial |
 | `caps` | procesos cap_setuid, file capabilities (`getcap -r /`) | sí |
 | `nfs` | exports no_root_squash | manual |
 | `path` | directorios escribibles en el PATH de root | sí |
@@ -187,7 +187,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-49 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout) y el fichero JSON de `--output` (forma y permisos 0600). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
+58 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins y el fichero JSON de `--output` (forma y permisos 0600). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
 
 ## Licencia
 

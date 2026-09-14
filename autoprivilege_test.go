@@ -1032,3 +1032,235 @@ func TestQuietSuppressesWarnings(t *testing.T) {
 		t.Errorf("ERROR logs must stay visible in quiet mode (failure diagnostics), got %q", errOut)
 	}
 }
+
+// --- Ronda 4: aislamiento de contenedores, GTFOBins SGID, simetría de vectores ---
+
+func TestPidNamespaceFromStatus(t *testing.T) {
+	cases := []struct {
+		name, status, want string
+	}{
+		{"single NSpid means host namespace", "Name:\tinit\nNSpid:\t1\nCapEff:\t0\n", "host"},
+		{"multi NSpid means own namespace", "Name:\tinit\nNSpid:\t4213\t7\n", "own"},
+		{"missing NSpid is honest unknown", "Name:\tinit\nCapEff:\t0\n", "unknown"},
+		{"empty NSpid is unknown", "NSpid:\n", "unknown"},
+		{"empty status is unknown", "", "unknown"},
+	}
+	for _, tc := range cases {
+		if got := pidNamespaceFromStatus(tc.status); got != tc.want {
+			t.Errorf("%s: pidNamespaceFromStatus = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestContainerPrivilegeFromStatus(t *testing.T) {
+	// cap_sys_admin = bit 21 = 0x200000; a privileged container typically
+	// carries the full mask 000001ffffffffff.
+	if got := containerPrivilegeFromStatus("CapEff:\t000001ffffffffff\n"); got != "privileged" {
+		t.Errorf("full CapEff mask must read as privileged, got %q", got)
+	}
+	if got := containerPrivilegeFromStatus("CapEff:\t00000000a80425fb\n"); got != "" {
+		t.Errorf("default docker mask (no sys_admin) must NOT read as privileged, got %q", got)
+	}
+	if got := containerPrivilegeFromStatus("Name:\tinit\n"); got != "" {
+		t.Errorf("missing CapEff line must never guess, got %q", got)
+	}
+}
+
+func TestCaptureGTFOFunctions(t *testing.T) {
+	mkFn := func(name string, codes ...string) map[string]interface{} {
+		c := make([]interface{}, len(codes))
+		for i, s := range codes {
+			c[i] = s
+		}
+		return map[string]interface{}{"function": name, "code": c}
+	}
+
+	// shell + sgid: both captured, shell wins the main slot.
+	cap := captureGTFOFunctions("demo", []interface{}{
+		mkFn("shell", "sh -p"), mkFn("sgid", "{{BIN}} -x"),
+	})
+	if cap.MainCmd != "sh -p" || !cap.MainIsShell {
+		t.Errorf("shell technique must win the main slot, got %+v", cap)
+	}
+	if cap.SgidCmd != "demo -x" {
+		t.Errorf("sgid technique must keep {{BIN}} substitution with the entry name, got %q", cap.SgidCmd)
+	}
+
+	// sgid-only entry (the R25 case: upstream lockfile-like binaries were
+	// dropped entirely).
+	cap = captureGTFOFunctions("lockfile", []interface{}{mkFn("sgid", "lockfile -x")})
+	if cap.MainCmd != "" {
+		t.Errorf("sgid-only entry must not fabricate a main technique, got %q", cap.MainCmd)
+	}
+	if cap.SgidCmd != "lockfile -x" {
+		t.Errorf("sgid-only entry must capture the sgid technique, got %q", cap.SgidCmd)
+	}
+
+	// Priority: the first of shell/sudo/command in array order wins (same
+	// behavior as the pre-refactor loop).
+	cap = captureGTFOFunctions("demo", []interface{}{
+		mkFn("sudo", "sudo -c x"), mkFn("shell", "sh -p"),
+	})
+	if cap.MainCmd != "sudo -c x" || cap.MainIsShell {
+		t.Errorf("first main-eligible function must win, got %+v", cap)
+	}
+
+	// Entries without usable code are skipped, never invented.
+	cap = captureGTFOFunctions("demo", []interface{}{mkFn("shell"), mkFn("sgid", "   ")})
+	if cap.MainCmd != "" || cap.SgidCmd != "" {
+		t.Errorf("empty/blank codes must yield nothing, got %+v", cap)
+	}
+}
+
+func TestEmbeddedSGIDShells(t *testing.T) {
+	if len(sgidLookup) == 0 {
+		t.Fatal("embedded sgidLookup must not be empty (shells document the -p technique under sgid)")
+	}
+	for _, bin := range []string{"bash", "sh", "python3", "perl"} {
+		cmd, ok := sgidLookup[bin]
+		if !ok || cmd == "" {
+			t.Errorf("embedded sgid technique missing for %q", bin)
+		}
+	}
+}
+
+func TestEnumerateSGIDPrefersSgidTechnique(t *testing.T) {
+	sgidLookup["sgidtestbin"] = "echo sgid-specific-technique"
+	defer delete(sgidLookup, "sgidtestbin")
+	p := &AutoPrivilege{Opts: Options{}}
+	enumerateSGID(p, Finding{Source: "SGID", Target: "/usr/bin/sgidtestbin", Exploitable: true})
+	if len(p.Vectors) != 1 {
+		t.Fatalf("expected 1 SGID vector, got %d", len(p.Vectors))
+	}
+	v := p.Vectors[0]
+	if v.Command != "echo sgid-specific-technique" {
+		t.Errorf("sgid technique must win over the generic lookup, got %q", v.Command)
+	}
+	if v.Meta["note"] == "" || !strings.Contains(v.Meta["note"], "sgid technique") {
+		t.Errorf("provenance note must declare the sgid technique, got %q", v.Meta["note"])
+	}
+}
+
+func TestEnumerateSGIDReusesSUIDWithNote(t *testing.T) {
+	if _, ok := sgidLookup["find"]; ok {
+		t.Skip("find gained an sgid entry — test premise invalid")
+	}
+	p := &AutoPrivilege{Opts: Options{}}
+	enumerateSGID(p, Finding{Source: "SGID", Target: "/usr/bin/find", Exploitable: true})
+	if len(p.Vectors) != 1 {
+		t.Fatalf("expected 1 SGID vector via fallback, got %d", len(p.Vectors))
+	}
+	v := p.Vectors[0]
+	if v.Command != gtfoLookup["find"] {
+		t.Errorf("fallback must reuse the generic technique, got %q", v.Command)
+	}
+	if !strings.Contains(v.Meta["note"], "SUID technique reused") {
+		t.Errorf("fallback must declare it reuses the SUID technique, got %q", v.Meta["note"])
+	}
+}
+
+func TestPersistedSGIDRestored(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AUTOPRIV_DB_DIR", dir)
+	db := `{"sgidtestbin2":{"cmd":"main-cmd","shell":false,"sgid_cmd":"sgid-cmd"}}`
+	if err := os.WriteFile(filepath.Join(dir, "gtfobins.json"), []byte(db), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loadPersistedGTFO()
+	defer func() {
+		delete(sgidLookup, "sgidtestbin2")
+		delete(gtfoLookup, "sgidtestbin2")
+		delete(gtfoCategory, "sgidtestbin2")
+		delete(suidShellBins, "sgidtestbin2")
+	}()
+	if sgidLookup["sgidtestbin2"] != "sgid-cmd" {
+		t.Errorf("persisted sgid_cmd must be restored into sgidLookup, got %q", sgidLookup["sgidtestbin2"])
+	}
+	if gtfoLookup["sgidtestbin2"] != "main-cmd" {
+		t.Errorf("persisted cmd must still be restored into gtfoLookup, got %q", gtfoLookup["sgidtestbin2"])
+	}
+}
+
+// TestVectorSelectionSymmetry is the structural guard R18 lacked: for EVERY
+// name in validVectors, selecting only that vector must yield vectors of
+// exactly that category — never another — and at least one of them. It also
+// checks enumerateAll produces the same total as the per-vector sum.
+func TestVectorSelectionSymmetry(t *testing.T) {
+	sources := []Finding{
+		{Source: "SUID", Target: "/usr/bin/python3", Exploitable: true},
+		{Source: "SGID", Target: "/usr/bin/bash", Exploitable: true},
+		{Source: "SUDO", Target: "ALL", Exploitable: true},
+		{Source: "CRON", Target: "/etc/cron.d/job", Exploitable: true},
+		{Source: "FILE", Target: "/etc/passwd", Exploitable: true},
+		{Source: "FILE", Target: "/etc/shadow", Description: "Writable shadow", Exploitable: true},
+		{Source: "DOCKER", Target: "/var/run/docker.sock", Exploitable: true},
+		{Source: "CONTAINER", Target: "/run/podman/podman.sock", Exploitable: true},
+		{Source: "CAPS", Target: "cap_setuid", Exploitable: true},
+		{Source: "NFS", Target: "host:/export", Exploitable: true},
+		{Source: "KERNEL", Target: "CVE-2022-0847", Exploitable: true},
+		{Source: "CRED", Target: "/home/u/.ssh/id_rsa", Exploitable: true},
+		{Source: "PATH", Target: "/tmp/writable", Exploitable: true},
+		{Source: "SERVICE", Target: "/etc/systemd/system/evil.service", Exploitable: true},
+	}
+
+	total := 0
+	for name := range validVectors {
+		p := &AutoPrivilege{Opts: Options{}}
+		p.Findings = append(p.Findings, sources...)
+		enumFindings := p.Findings
+		_ = enumFindings
+		for _, f := range sources {
+			if !f.Exploitable {
+				continue
+			}
+		}
+		en := &AutoPrivilege{Opts: Options{}}
+		en.Findings = append(en.Findings, sources...)
+		enumerateVectors(en, []string{name})
+		if len(en.Vectors) == 0 {
+			t.Errorf("vector %q produced ZERO vectors from a full finding set — dead or miswired case", name)
+			continue
+		}
+		for _, v := range en.Vectors {
+			if v.Category != name {
+				t.Errorf("vector %q must only yield category %q, got %q (%s) — cross-contamination", name, name, v.Category, v.Name)
+			}
+		}
+		total += len(en.Vectors)
+	}
+
+	all := &AutoPrivilege{Opts: Options{}}
+	all.Findings = append(all.Findings, sources...)
+	enumerateAll(all)
+	if len(all.Vectors) != total {
+		t.Errorf("enumerateAll (%d) must equal the sum of per-vector selections (%d)", len(all.Vectors), total)
+	}
+}
+
+// TestCanonicalSocketPathsDedupsAliasedSockets is the R26 regression: on
+// systemd hosts /var/run → /run, so the podman/containerd socket list holds
+// two prefixes for the SAME socket — the scan would report it twice. Aliased
+// paths must collapse to one; unresolvable paths keep their identity because
+// existence is decided later by Lstat.
+func TestCanonicalSocketPathsDedupsAliasedSockets(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.sock")
+	if err := os.WriteFile(real, []byte(""), 0600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "alias.sock")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("alias links not permitted in this environment (%v) — the dedup guard still runs in CI", err)
+	}
+	got := canonicalSocketPaths([]string{alias, real})
+	if len(got) != 1 {
+		t.Fatalf("aliased paths must collapse to one, got %v", got)
+	}
+	if got[0] != alias {
+		t.Errorf("first occurrence must win, got %v", got)
+	}
+	missing := []string{"/no/such/a.sock", "/no/such/b.sock"}
+	if got2 := canonicalSocketPaths(missing); len(got2) != 2 {
+		t.Errorf("unresolvable paths must be preserved (Lstat decides later), got %v", got2)
+	}
+}

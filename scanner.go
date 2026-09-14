@@ -425,6 +425,69 @@ func containerCgroupEvidence(cgroup string) []string {
 	return found
 }
 
+// pidNamespaceFromStatus classifies this process' PID-namespace visibility
+// from the raw /proc/<pid>/status text. The NSpid line carries one value per
+// nested namespace: a single value means the process shares the host PID
+// namespace (it sees the host init as PID 1), two or more mean the process
+// sits inside a PID namespace, and a missing line means the kernel is too
+// old to tell — "unknown" is the only honest answer there.
+func pidNamespaceFromStatus(status string) string {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, "NSpid:") {
+			continue
+		}
+		switch len(strings.Fields(strings.TrimPrefix(line, "NSpid:"))) {
+		case 0:
+			return "unknown"
+		case 1:
+			return "host"
+		default:
+			return "own"
+		}
+	}
+	return "unknown"
+}
+
+// containerPrivilegeFromStatus reports "privileged" when the CapEff mask in
+// the given status text includes CAP_SYS_ADMIN — the capability that unlocks
+// the classic breakouts (host mounts, cgroup tricks). Anything else (no CapEff
+// line, unparsable mask, mask without sys_admin) is "" — never a guess.
+func containerPrivilegeFromStatus(status string) string {
+	for _, line := range strings.Split(status, "\n") {
+		if !strings.HasPrefix(line, "CapEff:") {
+			continue
+		}
+		eff := parseCapHex(strings.TrimPrefix(line, "CapEff:"))
+		if eff&capSysAdmin != 0 {
+			return "privileged"
+		}
+		return ""
+	}
+	return ""
+}
+
+// canonicalSocketPaths collapses paths that alias the same file (systemd
+// distros symlink /var/run → /run, so a podman/containerd socket appears
+// under both prefixes and the naive list would report every socket twice —
+// R26). Unresolvable paths (socket absent on this host) keep their identity:
+// existence is decided later by Lstat, here only aliasing is collapsed.
+func canonicalSocketPaths(paths []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range paths {
+		key := p
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			key = real
+		}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, p)
+	}
+	return out
+}
+
 // scanContainers reports the container context the tool itself runs in and
 // the container-runtime breakout surfaces around it. Honesty rules: the
 // "inside a container" indicator never claims escalation by itself (the
@@ -432,6 +495,7 @@ func containerCgroupEvidence(cgroup string) []string {
 // check notes that rootless runtimes contain the classic breakout.
 func scanContainers(p *AutoPrivilege) {
 	var evidence []string
+	privileged := false
 	if _, err := os.Stat("/.dockerenv"); err == nil {
 		evidence = append(evidence, "/.dockerenv present")
 	}
@@ -443,14 +507,36 @@ func scanContainers(p *AutoPrivilege) {
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		evidence = append(evidence, "kubernetes service env")
 	}
+	// Isolation hardening (R24): a container that shares the host PID
+	// namespace changes how EVERY other finding must be read (host init,
+	// host processes and their /proc data are in reach), and a privileged
+	// container (cap_sys_admin in CapEff) makes the classic breakouts
+	// trivial instead of "needs a reachable runtime". The parser of
+	// capabilities already exists (parseCapHex) — reused, not duplicated.
+	if data, err := os.ReadFile("/proc/self/status"); err == nil {
+		if ns := pidNamespaceFromStatus(string(data)); ns == "host" {
+			evidence = append(evidence, "host PID namespace visible (PID 1 is the host init)")
+		}
+		if containerPrivilegeFromStatus(string(data)) == "privileged" {
+			evidence = append(evidence, "privileged caps (cap_sys_admin in CapEff)")
+			privileged = true
+		}
+	}
 	if len(evidence) > 0 {
+		risk := RiskMedium
+		if privileged {
+			// Honest escalation ladder: privileged = breakout is
+			// trivial, but it still needs a technique — the tool
+			// reports context, it does not pretend to escape.
+			risk = RiskHigh
+		}
 		addFinding(p, "CONTAINER", "self",
 			fmt.Sprintf("Running inside a container (%s) — breakout needs a reachable runtime socket or a privileged runtime",
 				strings.Join(evidence, ", ")),
-			RiskMedium, false)
+			risk, false)
 	}
 
-	for _, sock := range containerSocketPaths() {
+	for _, sock := range canonicalSocketPaths(containerSocketPaths()) {
 		info, err := os.Lstat(sock)
 		if err != nil || info.Mode()&os.ModeSocket == 0 {
 			continue
@@ -470,7 +556,9 @@ func scanContainers(p *AutoPrivilege) {
 	// its own: it can start a privileged container mounting the host root.
 	// scanDocker covers group membership and the raw socket; this also
 	// covers DOCKER_HOST / oddly-permissioned setups.
-	if out, err := runCmdOut(p.Opts.scanCmdTimeout(), "docker", "ps"); err == nil {
+	// Half the scan timeout (R28): on docker-less hosts this probe eats
+	// the full budget on every run for an answer that is always "no".
+	if out, err := runCmdOut(p.Opts.scanCmdTimeout()/2, "docker", "ps"); err == nil {
 		_ = out
 		addFinding(p, "CONTAINER", "docker-daemon",
 			"docker CLI reaches a live daemon — container breakout available (verify rootful vs rootless)",

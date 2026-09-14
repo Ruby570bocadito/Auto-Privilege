@@ -15,8 +15,9 @@ const gtfobinsURL = "https://gtfobins.github.io/gtfobins.json"
 
 // storedEntry is the on-disk shape of one GTFOBins technique.
 type storedEntry struct {
-	Cmd   string `json:"cmd"`
-	Shell bool   `json:"shell"`
+	Cmd     string `json:"cmd"`
+	Shell   bool   `json:"shell"`
+	SgidCmd string `json:"sgid_cmd,omitempty"`
 }
 
 // dbPath returns where the refreshed database is persisted:
@@ -49,19 +50,24 @@ func loadPersistedGTFO() {
 		return
 	}
 	for name, entry := range stored {
-		if entry.Cmd == "" {
+		if entry.Cmd == "" && entry.SgidCmd == "" {
 			continue
 		}
-		gtfoLookup[name] = entry.Cmd
-		if entry.Shell {
-			suidShellBins[name] = true
-		}
-		if _, known := gtfoCategory[name]; !known {
+		if entry.Cmd != "" {
+			gtfoLookup[name] = entry.Cmd
 			if entry.Shell {
-				gtfoCategory[name] = "suid-shell"
-			} else {
-				gtfoCategory[name] = "sudo"
+				suidShellBins[name] = true
 			}
+			if _, known := gtfoCategory[name]; !known {
+				if entry.Shell {
+					gtfoCategory[name] = "suid-shell"
+				} else {
+					gtfoCategory[name] = "sudo"
+				}
+			}
+		}
+		if entry.SgidCmd != "" {
+			sgidLookup[name] = entry.SgidCmd
 		}
 	}
 }
@@ -70,10 +76,47 @@ func init() {
 	loadPersistedGTFO()
 }
 
-type GTFOBinsUpdate struct {
-	LastUpdate string `json:"last_update"`
-	Entries    int    `json:"entries"`
-	NewEntries int    `json:"new_entries"`
+// gtfocapture is what one upstream entry yields: the main technique (first
+// of shell/sudo/command with usable code — the historical priority) and the
+// sgid technique (first sgid entry with usable code), which used to be
+// dropped entirely (R25).
+type gtfocapture struct {
+	MainCmd     string
+	MainIsShell bool
+	SgidCmd     string
+}
+
+// captureGTFOFunctions extracts the techniques of one upstream entry. Pure
+// (name + functions in, struct out): testable without network and without
+// touching the package-level lookups.
+func captureGTFOFunctions(name string, functions []interface{}) gtfocapture {
+	var captured gtfocapture
+	for _, fn := range functions {
+		fnMap, ok := fn.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fnName, _ := fnMap["function"].(string)
+		codes, _ := fnMap["code"].([]interface{})
+		if len(codes) == 0 {
+			continue
+		}
+		raw, _ := codes[0].(string)
+		if fnName == "shell" || fnName == "sudo" || fnName == "command" {
+			if captured.MainCmd != "" {
+				continue // first match keeps the priority
+			}
+			if cmd := cleanGTFOCmd(raw, name); cmd != "" {
+				captured.MainCmd = cmd
+				captured.MainIsShell = fnName == "shell"
+			}
+			continue
+		}
+		if fnName == "sgid" && captured.SgidCmd == "" {
+			captured.SgidCmd = cleanGTFOCmd(raw, name)
+		}
+	}
+	return captured
 }
 
 // updateGTFOBins fetches the upstream GTFOBins JSON, merges unknown binaries
@@ -114,9 +157,6 @@ func updateGTFOBins(opts Options) error {
 
 	newEntries := 0
 	for name, entry := range bins {
-		if _, exists := gtfoLookup[name]; exists {
-			continue
-		}
 		entryMap, ok := entry.(map[string]interface{})
 		if !ok {
 			continue
@@ -126,28 +166,32 @@ func updateGTFOBins(opts Options) error {
 			continue
 		}
 
-		for _, fn := range functions {
-			fnMap, ok := fn.(map[string]interface{})
-			if !ok {
-				continue
+		captured := captureGTFOFunctions(name, functions)
+		se := stored[name]
+
+		if captured.MainCmd != "" {
+			if _, exists := gtfoLookup[name]; !exists {
+				gtfoLookup[name] = captured.MainCmd
+				gtfoCategory[name] = map[bool]string{true: "suid-shell", false: "sudo"}[captured.MainIsShell]
+				suidShellBins[name] = captured.MainIsShell
+				newEntries++
 			}
-			fnName, _ := fnMap["function"].(string)
-			if fnName == "shell" || fnName == "sudo" || fnName == "command" {
-				codes, _ := fnMap["code"].([]interface{})
-				if len(codes) > 0 {
-					cmd, _ := codes[0].(string)
-					cmd = cleanGTFOCmd(cmd, name)
-					if cmd != "" {
-						isShell := fnName == "shell"
-						gtfoLookup[name] = cmd
-						gtfoCategory[name] = map[bool]string{true: "suid-shell", false: "sudo"}[isShell]
-						suidShellBins[name] = isShell
-						stored[name] = storedEntry{Cmd: cmd, Shell: isShell}
-						newEntries++
-					}
-				}
-				break
+			if se.Cmd == "" {
+				se.Cmd = captured.MainCmd
+				se.Shell = captured.MainIsShell
 			}
+		}
+		if captured.SgidCmd != "" {
+			if _, exists := sgidLookup[name]; !exists {
+				sgidLookup[name] = captured.SgidCmd
+				newEntries++
+			}
+			if se.SgidCmd == "" {
+				se.SgidCmd = captured.SgidCmd
+			}
+		}
+		if se != (storedEntry{}) {
+			stored[name] = se
 		}
 	}
 
@@ -177,6 +221,12 @@ func updateGTFOBins(opts Options) error {
 	}
 
 	return nil
+}
+
+type GTFOBinsUpdate struct {
+	LastUpdate string `json:"last_update"`
+	Entries    int    `json:"entries"`
+	NewEntries int    `json:"new_entries"`
 }
 
 func cleanGTFOCmd(cmd, bin string) string {

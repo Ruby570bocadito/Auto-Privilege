@@ -212,17 +212,26 @@ func enumerateSUID(p *AutoPrivilege, f Finding) {
 // SGID never grants uid 0, only the owning group — so the vector is always
 // manual: the tool shows the exact GTFOBins technique and states the limit,
 // instead of silently running a command that cannot produce root.
+// Technique provenance is declared (R25): an upstream "sgid" technique wins;
+// when none exists the SUID technique is reused and the note says so.
 func enumerateSGID(p *AutoPrivilege, f Finding) {
 	bin := extractBinName(f.Target)
-	cmd, ok := getCommand(bin)
+	note := "group root — group-level escalation only, no uid 0"
+	cmd, ok := sgidLookup[bin]
 	if !ok {
-		return
+		cmd, ok = getCommand(bin)
+		if !ok {
+			return
+		}
+		note += "; SUID technique reused (no sgid-specific entry)"
+	} else {
+		note += "; GTFOBins sgid technique"
 	}
 	addManualVector(p, "SGID "+bin, "sgid", f.Target, cmd, RiskMedium,
 		map[string]string{
 			"bin":  bin,
 			"path": f.Target,
-			"note": "group root — group-level escalation only, no uid 0",
+			"note": note,
 		})
 }
 

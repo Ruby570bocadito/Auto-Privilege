@@ -136,8 +136,10 @@ func printTopVectors(p *AutoPrivilege, n int) {
 }
 
 // printGTFOList dumps the embedded GTFOBins database grouped by category.
+// The sgid section lists entries that exist ONLY in sgidLookup — the shells
+// shared with the suid list are listed once, in their home section.
 func printGTFOList() {
-	suid, sudo := []string{}, []string{}
+	suid, sudo, sgidOnly := []string{}, []string{}, []string{}
 	for bin := range gtfoLookup {
 		if gtfoCategory[bin] == "suid-shell" {
 			suid = append(suid, bin)
@@ -145,14 +147,24 @@ func printGTFOList() {
 			sudo = append(sudo, bin)
 		}
 	}
+	for bin := range sgidLookup {
+		if _, shared := gtfoLookup[bin]; !shared {
+			sgidOnly = append(sgidOnly, bin)
+		}
+	}
 	sort.Strings(suid)
 	sort.Strings(sudo)
+	sort.Strings(sgidOnly)
 
-	fmt.Printf("  %s (%d entries)\n\n", colorize("── GTFOBins database ──", AnsiCyan), len(gtfoLookup))
+	fmt.Printf("  %s (%d entries + %d sgid)\n\n", colorize("── GTFOBins database ──", AnsiCyan), len(gtfoLookup), len(sgidLookup))
 	fmt.Printf("  %s (%d)\n", colorize("suid shell", AnsiGreen), len(suid))
 	fmt.Printf("    %s\n\n", wrapCols(suid, ", "))
 	fmt.Printf("  %s (%d)\n", colorize("sudo", AnsiBlue), len(sudo))
 	fmt.Printf("    %s\n\n", wrapCols(sudo, ", "))
+	if len(sgidOnly) > 0 {
+		fmt.Printf("  %s (%d)\n", colorize("sgid", AnsiYellow), len(sgidOnly))
+		fmt.Printf("    %s\n\n", wrapCols(sgidOnly, ", "))
+	}
 	fmt.Println(colorize("  embedded in the binary — works air-gapped; --update-gtfobins refreshes it", AnsiGrey))
 }
 

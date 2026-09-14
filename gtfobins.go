@@ -9,6 +9,12 @@ var gtfoLookup = map[string]string{}
 // gtfoCategory tracks where each entry applies: "suid-shell" or "sudo".
 var gtfoCategory = map[string]string{}
 
+// sgidLookup holds techniques that apply to SGID binaries specifically.
+// Upstream GTFOBins tracks them as the "sgid" function; historically this
+// tool reused the SUID technique silently. enumerateSGID prefers an entry
+// here and falls back to the generic lookup with an explicit note.
+var sgidLookup = map[string]string{}
+
 // GTFOCount returns the number of embedded techniques.
 func GTFOCount() int { return len(gtfoLookup) }
 
@@ -110,6 +116,11 @@ func init() {
 		if cmd, ok := shellCmd[bin]; ok {
 			gtfoLookup[bin] = cmd
 			gtfoCategory[bin] = "suid-shell"
+			// SGID shells carry the same documented technique: -p
+			// preserves egid exactly like it preserves euid, and
+			// upstream lists the identical command under the sgid
+			// function for these bins.
+			sgidLookup[bin] = cmd
 		}
 	}
 	for bin, cmd := range sudoOnly {
