@@ -572,3 +572,257 @@ func TestAmIRoot(t *testing.T) {
 		t.Error("currentUsername returned empty")
 	}
 }
+
+func TestClassifySGID(t *testing.T) {
+	// SGID never grants uid 0 — only root-group + known technique is a vector.
+	if _, exploitable := classifySGID("totally-unknown-bin", 0); exploitable {
+		t.Error("unknown binary must not be an SGID vector even with group root")
+	}
+	if _, exploitable := classifySGID("bash", 1000); exploitable {
+		t.Error("known technique with non-root group must not be exploitable")
+	}
+	risk, exploitable := classifySGID("bash", 0)
+	if !exploitable {
+		t.Error("bash SGID with group root must be exploitable (manual vector)")
+	}
+	if risk != RiskMedium {
+		t.Errorf("SGID root vector risk = %s, want MEDIUM (group-level, no uid 0)", risk)
+	}
+}
+
+func TestEnumerateSGIDVector(t *testing.T) {
+	p := &AutoPrivilege{Opts: Options{}}
+	f := Finding{
+		Source:      "SGID",
+		Target:      "/usr/bin/bash",
+		Description: "SGID binary: bash (group root — GTFOBins: true) — group-level escalation, no uid 0",
+		Risk:        RiskMedium,
+		Exploitable: true,
+	}
+	enumerateSGID(p, f)
+	if len(p.Vectors) != 1 {
+		t.Fatalf("expected 1 SGID vector, got %d", len(p.Vectors))
+	}
+	v := p.Vectors[0]
+	if v.Exploit != nil {
+		t.Error("SGID vector must be manual (no auto-exploit for a group privilege)")
+	}
+	if v.Category != "sgid" {
+		t.Errorf("category = %s, want sgid", v.Category)
+	}
+	if v.Meta["note"] == "" {
+		t.Error("SGID vector must carry the no-uid-0 honesty note")
+	}
+	if want, _ := getCommand("bash"); v.Command != want {
+		t.Errorf("command = %q, want the GTFOBins technique %q", v.Command, want)
+	}
+}
+
+func TestVectorListIncludesSGID(t *testing.T) {
+	names, err := parseVectorList("sgid,suid")
+	if err != nil {
+		t.Fatalf("sgid must be a valid --vector name: %v", err)
+	}
+	if len(names) != 2 {
+		t.Errorf("expected 2 vector names, got %d", len(names))
+	}
+	if _, err := parseVectorList("sgidd"); err == nil {
+		t.Error("typo sgidd must be rejected")
+	}
+}
+
+func TestScanCmdTimeoutDefault(t *testing.T) {
+	if got := (Options{}).scanCmdTimeout(); got != 5*time.Second {
+		t.Errorf("zero Options must default to 5s, got %v", got)
+	}
+	if got := (Options{ScanTimeout: 2 * time.Second}).scanCmdTimeout(); got != 2*time.Second {
+		t.Errorf("ScanTimeout override ignored: got %v", got)
+	}
+	if got := (Options{ScanTimeout: -1}).scanCmdTimeout(); got != 5*time.Second {
+		t.Errorf("negative ScanTimeout must fall back to 5s, got %v", got)
+	}
+}
+
+// stubSetBitModes replaces processSetBitEntryFn with a simulation: files
+// whose name contains "bin_suid" behave as SUID and "bin_sgid" as SGID.
+// Hardened sandboxes clear the real bits on chmod, so the walk logic
+// (recursion, symlink skip, dedup, depth) must be testable without them.
+func stubSetBitModes(t *testing.T) {
+	t.Helper()
+	orig := processSetBitEntryFn
+	processSetBitEntryFn = func(p *AutoPrivilege, full string, e os.DirEntry, info os.FileInfo) {
+		name := e.Name()
+		switch {
+		case strings.Contains(name, "bin_suid"):
+			risk, expl := classifySUID(name, 1001)
+			reportSetBit(p, "SUID", name, full, 1001, risk, expl)
+		case strings.Contains(name, "bin_sgid"):
+			risk, expl := classifySGID(name, 1001)
+			reportSetBit(p, "SGID", name, full, 1001, risk, expl)
+		}
+	}
+	t.Cleanup(func() { processSetBitEntryFn = orig })
+}
+
+func TestWalkSetBitsRecursive(t *testing.T) {
+	stubSetBitModes(t)
+	root := t.TempDir()
+	deep := filepath.Join(root, "level1", "level2")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	suid := filepath.Join(deep, "bin_suid")
+	if err := os.WriteFile(suid, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	sgid := filepath.Join(root, "bin_sgid")
+	if err := os.WriteFile(sgid, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink alias must be skipped, never processed — but sandboxes may
+	// forbid creating symlinks, so this part is best-effort.
+	_ = osLink(suid, filepath.Join(root, "alias_suid"))
+
+	p := &AutoPrivilege{Opts: Options{}}
+	seen := map[string]bool{}
+	walkSetBits(p, root, 0, seen)
+
+	var suidHits, sgidHits []Finding
+	for _, f := range p.Findings {
+		switch f.Source {
+		case "SUID":
+			suidHits = append(suidHits, f)
+		case "SGID":
+			sgidHits = append(sgidHits, f)
+		}
+	}
+	if len(suidHits) != 1 {
+		t.Fatalf("expected exactly 1 SUID finding (deep dir reached, alias skipped), got %d", len(suidHits))
+	}
+	if suidHits[0].Target != suid {
+		t.Errorf("SUID target = %s, want %s", suidHits[0].Target, suid)
+	}
+	if suidHits[0].Exploitable {
+		t.Error("SUID owned by the non-root tester must be informational, not exploitable")
+	}
+	if len(sgidHits) != 1 {
+		t.Fatalf("expected exactly 1 SGID finding, got %d", len(sgidHits))
+	}
+	if sgidHits[0].Target != sgid {
+		t.Errorf("SGID target = %s, want %s", sgidHits[0].Target, sgid)
+	}
+	// Dedup: re-walking the same tree must not duplicate findings.
+	walkSetBits(p, root, 0, seen)
+	if got := len(p.Findings); got != 2 {
+		t.Errorf("dedup failed: %d findings after re-walk, want 2", got)
+	}
+}
+
+func TestWalkSetBitsDepthLimit(t *testing.T) {
+	stubSetBitModes(t)
+	root := t.TempDir()
+	deep := root
+	for i := 0; i < maxSetBitDepth+2; i++ {
+		deep = filepath.Join(deep, "d")
+	}
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tooDeep := filepath.Join(deep, "bin_suid")
+	if err := os.WriteFile(tooDeep, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &AutoPrivilege{Opts: Options{}}
+	walkSetBits(p, root, 0, map[string]bool{})
+	for _, f := range p.Findings {
+		if f.Target == tooDeep {
+			t.Error("bin beyond maxSetBitDepth must not be reported (depth guard)")
+		}
+	}
+}
+
+// captureStderr swaps os.Stderr for a pipe, runs fn and returns what was
+// written — the stderr twin of the stdout capture used by the quiet tests.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = orig
+	data, _ := io.ReadAll(r)
+	return string(data)
+}
+
+func TestLogComposesSingleLine(t *testing.T) {
+	// Colors embed ANSI escapes inside the prefix, so they are disabled for
+	// a byte-exact assertion (same pattern as TestColorOutput).
+	setColorMode(false)
+	defer setColorMode(true)
+	out := captureStderr(t, func() {
+		log(LogWarn, "main", "Dry-run mode — exploitation skipped", "", Options{})
+	})
+	if !strings.Contains(out, "[WARN] [main] Dry-run mode — exploitation skipped") {
+		t.Errorf("log line must contain the full prefix+msg, got %q", out)
+	}
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Errorf("expected exactly 1 line (single write), got %d in %q", n, out)
+	}
+}
+
+func TestLogIncludesDetail(t *testing.T) {
+	setColorMode(false)
+	defer setColorMode(true)
+	out := captureStderr(t, func() {
+		log(LogError, "exploit", "Exploit failed: test", "boom", Options{})
+	})
+	if !strings.Contains(out, "Exploit failed: test (boom)") {
+		t.Errorf("detail must be appended to the same line, got %q", out)
+	}
+}
+
+func TestIsPathPlantingDirCases(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if planting, _ := isPathPlantingDir(dir); planting {
+		t.Error("own 0755 dir must not be planting bait (the PATH false positive)")
+	}
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if planting, _ := isPathPlantingDir(dir); planting {
+		t.Error("own 0777 dir is your terrain, not planting bait")
+	}
+	if planting, _ := isPathPlantingDir(filepath.Join(dir, "nope")); planting {
+		t.Error("nonexistent path must not be planting bait")
+	}
+	file := filepath.Join(dir, "afile")
+	if err := os.WriteFile(file, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if planting, _ := isPathPlantingDir(file); planting {
+		t.Error("a regular file is not a directory bait")
+	}
+}
+
+func TestScanWritablePathOwnDirsNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":/usr/bin")
+	p := &AutoPrivilege{Opts: Options{}}
+	scanWritablePath(p)
+	for _, f := range p.Findings {
+		if f.Source == "PATH" {
+			t.Errorf("own PATH dir must not be flagged as planting: %s", f.Target)
+		}
+	}
+}

@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +18,7 @@ import (
 // ================================================================
 
 var scannerOrder = []func(*AutoPrivilege){
-	scanSUID, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
+	scanSetBits, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
 	scanCapabilities, scanFileCaps, scanNFS, scanWritablePath, scanServices,
 	scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
 }
@@ -47,7 +46,7 @@ func addFinding(p *AutoPrivilege, source, target, desc string, risk RiskLevel, e
 	})
 }
 
-// --- SUID ---
+// --- SUID / SGID ---
 // classifySUID decides whether a SUID binary is a root-escalation vector.
 // The setuid bit only helps if the file is owned by root: a SUID binary
 // owned by another user escalates to that user, never to uid 0. Without
@@ -67,56 +66,126 @@ func classifySUID(bin string, ownerUID uint32) (risk RiskLevel, exploitable bool
 	return RiskLow, true
 }
 
-func scanSUID(p *AutoPrivilege) {
-	// Common SUID paths
-	paths := []string{
-		"/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local/bin",
-		"/usr/local/sbin", "/snap/bin", "/opt", "/usr/lib",
+// classifySGID mirrors classifySUID for the setgid bit. An SGID binary never
+// grants uid 0 — it only grants the owning group — so a finding counts as a
+// real vector solely when the group is root AND a GTFOBins technique exists.
+// Even then it becomes a manual vector downstream (honest results: no
+// auto-exploit claiming root from a group privilege).
+func classifySGID(bin string, ownerGID uint32) (risk RiskLevel, exploitable bool) {
+	if _, ok := getCommand(bin); !ok {
+		return RiskLow, false
 	}
-	seen := map[string]bool{}
+	if ownerGID != 0 {
+		return RiskLow, false
+	}
+	return RiskMedium, true
+}
 
-	for _, dir := range paths {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
+// setBitRoots are the directory trees walked for SUID/SGID files.
+var setBitRoots = []string{
+	"/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local/bin",
+	"/usr/local/sbin", "/snap/bin", "/opt", "/usr/lib", "/usr/libexec",
+}
+
+// maxSetBitDepth bounds the recursive walk so a pathological tree (or a
+// symlink loop that survived our symlink guard) can never stall the scan.
+const maxSetBitDepth = 4
+
+// scanSetBits walks the binary trees once, reporting SUID and SGID files in
+// the same pass. The old scanner used a flat os.ReadDir per path, which
+// missed every binary inside a subdirectory (ssh-keysign,
+// dbus-daemon-launch-helper) and never looked at SGID at all.
+func scanSetBits(p *AutoPrivilege) {
+	seen := map[string]bool{}
+	for _, dir := range setBitRoots {
+		walkSetBits(p, dir, 0, seen)
+	}
+}
+
+// processSetBitEntryFn is the hook the walk uses to classify and store each
+// regular file. It is a package variable so tests can simulate the setuid /
+// setgid bits: hardened CI sandboxes silently clear them on chmod, and the
+// walk logic (recursion, symlink skip, dedup, depth guard) must stay testable
+// everywhere.
+var processSetBitEntryFn = func(p *AutoPrivilege, full string, e os.DirEntry, info os.FileInfo) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+	if info.Mode()&os.ModeSetuid != 0 {
+		risk, expl := classifySUID(e.Name(), stat.Uid)
+		reportSetBit(p, "SUID", e.Name(), full, stat.Uid, risk, expl)
+	}
+	if info.Mode()&os.ModeSetgid != 0 {
+		risk, expl := classifySGID(e.Name(), stat.Gid)
+		reportSetBit(p, "SGID", e.Name(), full, stat.Gid, risk, expl)
+	}
+}
+
+func walkSetBits(p *AutoPrivilege, dir string, depth int, seen map[string]bool) {
+	if depth > maxSetBitDepth {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		// Never follow symlinks: merged-usr distros alias /bin → /usr/bin and
+		// a hostile tree could point anywhere. Real binaries are reached
+		// through their real directories, so nothing is missed.
+		if e.Type()&os.ModeSymlink != 0 {
 			continue
 		}
-		for _, e := range entries {
-			if e.IsDir() || seen[e.Name()] {
-				continue
-			}
-			full := filepath.Join(dir, e.Name())
-			info, err := os.Lstat(full)
-			if err != nil {
-				continue
-			}
-			// SUID bit set
-			if info.Mode()&os.ModeSetuid != 0 && !info.Mode().IsDir() && info.Mode().IsRegular() {
-				seen[e.Name()] = true
-				bin := e.Name()
-
-				var ownerUID uint32
-				if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-					ownerUID = stat.Uid
-				}
-				risk, exploitable := classifySUID(bin, ownerUID)
-				if !exploitable {
-					// Kept as informational intel (never printed, counted in
-					// JSON) with the reason spelled out instead of a bare
-					// "GTFOBins: false" — non-root-owned bins are not root
-					// vectors at all.
-					desc := fmt.Sprintf("SUID binary: %s (GTFOBins: false)", bin)
-					if ownerUID != 0 {
-						desc = fmt.Sprintf("SUID binary: %s (owner uid %d — not a root vector)", bin, ownerUID)
-					}
-					addFinding(p, "SUID", full, desc, RiskLow, false)
-					continue
-				}
-				addFinding(p, "SUID", full,
-					fmt.Sprintf("SUID binary: %s (GTFOBins: true)", bin),
-					risk, true)
-			}
+		if e.IsDir() {
+			walkSetBits(p, full, depth+1, seen)
+			continue
 		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		// Dedup by the resolved real path so bind-merged trees (/bin and
+		// /usr/bin pointing at the same file) report each binary once.
+		resolved, err := filepath.EvalSymlinks(full)
+		if err != nil {
+			resolved = full
+		}
+		if seen[resolved] {
+			continue
+		}
+		seen[resolved] = true
+
+		processSetBitEntryFn(p, full, e, info)
 	}
+}
+
+// reportSetBit stores one SUID/SGID finding. Non-vector files stay as
+// informational intel (counted in JSON, not printed) with the reason spelled
+// out instead of a bare boolean.
+func reportSetBit(p *AutoPrivilege, kind, bin, full string, ownerID uint32, risk RiskLevel, exploitable bool) {
+	if exploitable {
+		var desc string
+		if kind == "SUID" {
+			desc = fmt.Sprintf("SUID binary: %s (GTFOBins: true)", bin)
+		} else {
+			desc = fmt.Sprintf("SGID binary: %s (group root — GTFOBins: true) — group-level escalation, no uid 0", bin)
+		}
+		addFinding(p, kind, full, desc, risk, true)
+		return
+	}
+	reason := "GTFOBins: false"
+	if ownerID != 0 {
+		// For SUID the id is the file owner's; for SGID it is the owning
+		// group's — spell the difference out so the JSON stays unambiguous.
+		label := fmt.Sprintf("%s owner id %d", kind, ownerID)
+		if kind == "SGID" {
+			label = fmt.Sprintf("group gid %d", ownerID)
+		}
+		reason = fmt.Sprintf("%s — not a root vector", label)
+	}
+	addFinding(p, kind, full, fmt.Sprintf("%s binary: %s (%s)", kind, bin, reason), RiskLow, false)
 }
 
 // --- Sudo ---
@@ -128,7 +197,7 @@ func scanSudo(p *AutoPrivilege) {
 
 	// sudo -n fails fast instead of prompting for a password (the old
 	// `sudo -l` fallback hung forever in labs without a password).
-	out, err := runCmdOut(5*time.Second, "sudo", "-n", "-l")
+	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "sudo", "-n", "-l")
 	if err != nil {
 		return
 	}
@@ -171,9 +240,9 @@ func scanSudo(p *AutoPrivilege) {
 	}
 
 	// Check if user is in sudo group
-	if isInGroup(user, "sudo") || isInGroup(user, "wheel") {
+	if isInGroup(p.Opts, user, "sudo") || isInGroup(p.Opts, user, "wheel") {
 		// Try passwordless sudo (timeout guard)
-		out3, err3 := runCmdOut(5*time.Second, "sudo", "-n", "true")
+		out3, err3 := runCmdOut(p.Opts.scanCmdTimeout(), "sudo", "-n", "true")
 		_ = out3
 		if err3 == nil {
 			addFinding(p, "SUDO", user,
@@ -183,9 +252,8 @@ func scanSudo(p *AutoPrivilege) {
 	}
 }
 
-func isInGroup(user, group string) bool {
-	cmd := exec.Command("groups", user)
-	out, err := cmd.Output()
+func isInGroup(o Options, user, group string) bool {
+	out, err := runCmdOut(o.scanCmdTimeout(), "groups", user)
 	if err != nil {
 		return false
 	}
@@ -240,8 +308,8 @@ func scanCron(p *AutoPrivilege) {
 	}
 
 	// Check crontab -l for writable scripts referenced
-	cmd := exec.Command("crontab", "-l")
-	out, err := cmd.Output()
+	// (runCmdOut guard: the project standard — no bare exec calls in scans)
+	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "crontab", "-l")
 	if err == nil && len(out) > 0 {
 		lines := strings.Split(string(out), "\n")
 		for _, line := range lines {
@@ -295,7 +363,7 @@ func scanShadow(p *AutoPrivilege) {
 func scanDocker(p *AutoPrivilege) {
 	// Real group parsing — substring matching produced false positives
 	// for users like "dockerdb".
-	if isInGroup(currentUsername(), "docker") {
+	if isInGroup(p.Opts, currentUsername(), "docker") {
 		addFinding(p, "DOCKER", currentUsername(),
 			"User in docker group — container breakout to root",
 			RiskHigh, true)
@@ -364,7 +432,9 @@ func scanCapabilities(p *AutoPrivilege) {
 // scanFileCaps looks for binaries with file capabilities (e.g. cap_setuid+ep
 // on an interpreter) using getcap when available.
 func scanFileCaps(p *AutoPrivilege) {
-	out, err := runCmdOut(20*time.Second, "getcap", "-r", "/usr", "/bin", "/sbin", "/opt")
+	// getcap -r walks the whole filesystem: it is the slowest external call
+	// of the scan, so it gets 4x the configured timeout.
+	out, err := runCmdOut(4*p.Opts.scanCmdTimeout(), "getcap", "-r", "/usr", "/bin", "/sbin", "/opt")
 	if err != nil {
 		return // getcap missing or unreadable paths — skip silently
 	}
@@ -408,45 +478,49 @@ func scanNFS(p *AutoPrivilege) {
 }
 
 // --- Writable PATH entries ---
+// scanWritablePath flags PATH directories the CURRENT USER can really write
+// to. The old version tested the OWNER's write bit (`perm&0200`), which
+// flagged root-owned 755 directories as "writable binary planting" — a false
+// positive the Director reproduced live (honest results demand real access).
 func scanWritablePath(p *AutoPrivilege) {
-	path := os.Getenv("PATH")
-	uid := uint32(os.Getuid())
-
-	// Standard system directories — skip unless we own them
-	systemDirs := map[string]bool{
-		"/usr/local/sbin": true,
-		"/usr/local/bin":  true,
-		"/usr/sbin":       true,
-		"/usr/bin":        true,
-		"/sbin":           true,
-		"/bin":            true,
+	// Running as root, nothing in PATH can escalate further: every
+	// directory is "writable" and every finding would be noise.
+	if os.Geteuid() == 0 {
+		return
 	}
 
-	for _, dir := range strings.Split(path, ":") {
+	for _, dir := range strings.Split(os.Getenv("PATH"), ":") {
 		if dir == "" {
 			dir = "."
 		}
-		info, err := os.Lstat(dir)
-		if err != nil {
-			continue
-		}
-		// Skip standard system dirs unless we own them
-		if systemDirs[dir] {
-			stat, ok := info.Sys().(*syscall.Stat_t)
-			if !ok || stat.Uid != uid {
-				continue
-			}
-		}
-		if info.Mode().Perm()&0200 != 0 {
-			// Only flag if we don't own it
-			stat, ok := info.Sys().(*syscall.Stat_t)
-			if ok && stat.Uid != uid {
-				addFinding(p, "PATH", dir,
-					"Writable directory in PATH (owned by UID "+fmt.Sprintf("%d", stat.Uid)+") — binary planting",
-					RiskHigh, true)
-			}
+		if planting, owner := isPathPlantingDir(dir); planting {
+			addFinding(p, "PATH", dir,
+				"Writable directory in PATH (owner uid "+owner+") — binary planting",
+				RiskHigh, true)
 		}
 	}
+}
+
+// isPathPlantingDir reports whether dir is a binary-planting bait: a
+// directory in PATH the current user can write but does NOT own (group- or
+// world-writable). Your own directories are your terrain, not bait. The
+// second return value is the owner uid for the finding text.
+func isPathPlantingDir(dir string) (bool, string) {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() {
+		return false, ""
+	}
+	if !isWritableByCurrentUser(dir) {
+		return false, ""
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false, ""
+	}
+	if stat.Uid == uint32(os.Getuid()) {
+		return false, ""
+	}
+	return true, fmt.Sprintf("%d", stat.Uid)
 }
 
 // isWritableByCurrentUser checks if the current user/group can write to a file
@@ -560,7 +634,7 @@ func kernelInRange(v, minV, maxV []int) bool {
 }
 
 func scanKernelCVE(p *AutoPrivilege) {
-	out, err := runCmdOut(5*time.Second, "uname", "-r")
+	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "uname", "-r")
 	if err != nil {
 		return
 	}
@@ -628,7 +702,7 @@ func scanPwnKit(p *AutoPrivilege) {
 		return
 	}
 	version := ""
-	if out, err := runCmdOut(3*time.Second, "/usr/bin/pkexec", "--version"); err == nil {
+	if out, err := runCmdOut(p.Opts.scanCmdTimeout(), "/usr/bin/pkexec", "--version"); err == nil {
 		version = strings.TrimSpace(string(out))
 	}
 	addFinding(p, "KERNEL", "CVE-2021-4034",
@@ -641,7 +715,7 @@ func scanPwnKit(p *AutoPrivilege) {
 // scanSudoVersion flags old sudo builds vulnerable to Baron Samedit
 // (CVE-2021-3156, fixed in 1.9.5p2) — a sudo bug, not a kernel one.
 func scanSudoVersion(p *AutoPrivilege) {
-	out, err := runCmdOut(3*time.Second, "sudo", "--version")
+	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "sudo", "--version")
 	if err != nil {
 		return
 	}

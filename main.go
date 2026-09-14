@@ -112,7 +112,7 @@ func run() *AutoPrivilege {
 
 	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
 	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sudo,cron,passwd,shadow,docker,caps,nfs,path,service,kernel,cred")
+	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,caps,nfs,path,service,kernel,cred")
 	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
 	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
 	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
@@ -127,6 +127,7 @@ func run() *AutoPrivilege {
 	flag.BoolVar(&opts.Verbose, "verbose", false, "Verbose logging on stderr")
 	flag.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
 	flag.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
+	flag.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
 	flag.Usage = usage
@@ -158,6 +159,11 @@ func run() *AutoPrivilege {
 		os.Exit(2)
 	}
 	opts.MaxRisk = parseMaxRisk(risk)
+
+	if opts.ScanTimeout <= 0 {
+		fmt.Fprintf(os.Stderr, "  [-] invalid --scan-timeout %q (must be a positive duration, e.g. 10s)\n", opts.ScanTimeout)
+		os.Exit(2)
+	}
 
 	if opts.Quiet {
 		opts.Exploit = true

@@ -82,11 +82,14 @@ func log(level LogLevel, module, msg, detail string, opts Options) {
 	if color != "" {
 		prefix = colorize(prefix, color)
 	}
-	fmt.Fprintf(os.Stderr, "%s %s", prefix, msg)
+	// One atomic write per log line: composing prefix + msg + detail
+	// + newline into a single Write keeps piped stderr from interleaving
+	// with stdout mid-line (observed as "[WARN] ain] ..." under 2>&1).
+	line := prefix + " " + msg
 	if detail != "" {
-		fmt.Fprintf(os.Stderr, " (%s)", detail)
+		line += " (" + detail + ")"
 	}
-	fmt.Fprintln(os.Stderr)
+	fmt.Fprint(os.Stderr, line+"\n")
 }
 
 func logScanStart(opts Options)    { log(LogInfo, "scanner", "Starting system scan...", "", opts) }

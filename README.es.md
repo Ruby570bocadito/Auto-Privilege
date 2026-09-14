@@ -10,7 +10,7 @@ Un binario Go. Cero dependencias. Resultados honestos.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-28%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-34%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
@@ -83,7 +83,7 @@ Modos:
   --update-gtfobins         refresca la base GTFOBins desde upstream (persistida)
 
 Filtrado:
-  --vector lista            separada por comas: suid,sudo,cron,passwd,shadow,
+  --vector lista            separada por comas: suid,sgid,sudo,cron,passwd,shadow,
                             docker,caps,nfs,path,service,kernel,cred
   --risk nivel              riesgo máximo de auto-explotación: safe|low|medium|high|danger
   --one-shot                parar tras el primer exploit exitoso
@@ -100,6 +100,7 @@ Salida:
 
 Varios:
   --stealth                 jitter entre escáneres y exploits
+  --scan-timeout dur        timeout para comandos externos del escaneo (por defecto 5s)
   --rooteame ruta           carga un módulo .ko al conseguir root (solo lab)
   --version                 imprime versión
   -h, --help                esta ayuda
@@ -111,7 +112,8 @@ Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ej
 
 | Vector | Qué comprueba | Auto? |
 |---|---|---|
-| `suid` | binarios SUID/SGID + match GTFOBins (`python3`, `find`, ...) | sí |
+| `suid` | Binarios SUID (walk recursivo) + coincidencia GTFOBins (`python3`, `find`, ...) | sí |
+| `sgid` | Binarios SGID con grupo root — escalación de grupo, vector manual | manual |
 | `sudo` | reglas sudo -l, entradas NOPASSWD, CVEs por versión de sudo (rango Baron Samedit) | parcial |
 | `cron` | `/etc/cron*` escribible, jobs cron con PATH | sí |
 | `passwd` | `/etc/passwd` escribible — inyección de usuario root | sí |
@@ -183,7 +185,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-28 tests unitarios cubren a propósito las partes delicadas: el arte del banner se verifica decodificándolo rune a rune (se acabaron los ASCII art mal escritos), parseo CSV de vectores, ordenación por riesgo, rangos de CVEs de kernel, rangos de versiones de sudo, timeouts de explotación, regresiones de quoting de shell, guards de spool, formatos de hash y escapado de markdown. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
+34 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación y límite de profundidad), la clasificación honesta de SGID y el timeout configurable de escaneo. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
 
 ## Licencia
 

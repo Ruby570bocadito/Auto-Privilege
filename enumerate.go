@@ -14,7 +14,7 @@ import (
 
 // validVectors lists every --vector name accepted on the CLI.
 var validVectors = map[string]bool{
-	"suid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
+	"suid": true, "sgid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
 	"docker": true, "caps": true, "nfs": true, "path": true, "service": true,
 	"kernel": true, "cred": true,
 }
@@ -60,6 +60,8 @@ func enumerateAll(p *AutoPrivilege) {
 		switch f.Source {
 		case "SUID":
 			enumerateSUID(p, f)
+		case "SGID":
+			enumerateSGID(p, f)
 		case "SUDO":
 			enumerateSUDO(p, f)
 		case "CRON":
@@ -102,7 +104,10 @@ func enumerateVectors(p *AutoPrivilege, names []string) {
 				if f.Source == "SUID" {
 					enumerateSUID(p, f)
 				}
-			case "sudo":
+			case "sgid":
+				if f.Source == "SGID" {
+					enumerateSGID(p, f)
+				}
 				if f.Source == "SUDO" {
 					enumerateSUDO(p, f)
 				}
@@ -191,6 +196,24 @@ func enumerateSUID(p *AutoPrivilege, f Finding) {
 			return exploitSUID(f.Target, cmd, p.Opts)
 		},
 		map[string]string{"bin": bin, "path": f.Target})
+}
+
+// --- SGID enumeration ---
+// SGID never grants uid 0, only the owning group — so the vector is always
+// manual: the tool shows the exact GTFOBins technique and states the limit,
+// instead of silently running a command that cannot produce root.
+func enumerateSGID(p *AutoPrivilege, f Finding) {
+	bin := extractBinName(f.Target)
+	cmd, ok := getCommand(bin)
+	if !ok {
+		return
+	}
+	addManualVector(p, "SGID "+bin, "sgid", f.Target, cmd, RiskMedium,
+		map[string]string{
+			"bin":  bin,
+			"path": f.Target,
+			"note": "group root — group-level escalation only, no uid 0",
+		})
 }
 
 // --- SUDO enumeration ---

@@ -10,7 +10,7 @@ One Go binary. Zero dependencies. Honest results.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-28%20passing-brightgreen" alt="Tests">
+  <img src="https://img.shields.io/badge/tests-34%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
@@ -83,7 +83,7 @@ Modes:
   --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
 Targeting:
-  --vector list             comma-separated: suid,sudo,cron,passwd,shadow,
+  --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
                             docker,caps,nfs,path,service,kernel,cred
   --risk level              max auto-exploit risk: safe|low|medium|high|danger
   --one-shot                stop after the first successful exploit
@@ -100,6 +100,7 @@ Output:
 
 Misc:
   --stealth                 jitter between scanners and exploits
+  --scan-timeout dur        timeout for scan-time external commands (default 5s)
   --rooteame path           load .ko module if root is obtained (lab only)
   --version                 print version
   -h, --help                this help
@@ -111,7 +112,8 @@ Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error.
 
 | Vector | What it checks | Auto? |
 |---|---|---|
-| `suid` | SUID/SGID binaries + GTFOBins match (`python3`, `find`, ...) | yes |
+| `suid` | SUID binaries (recursive walk) + GTFOBins match (`python3`, `find`, ...) | yes |
+| `sgid` | SGID binaries with root group — group-level escalation, manual vector | manual |
 | `sudo` | sudo -l rules, NOPASSWD entries, sudo version CVEs (Baron Samedit range) | partial |
 | `cron` | writable `/etc/cron*`, PATH cron jobs | yes |
 | `passwd` | writable `/etc/passwd` — root user injection | yes |
@@ -183,7 +185,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-28 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping. CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
+34 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup and depth guard), honest SGID classification and the configurable scan timeout. CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
 
 ## License
 

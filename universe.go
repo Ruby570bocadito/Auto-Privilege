@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-const Version = "1.2.0"
+const Version = "1.3.0"
 
 type RiskLevel int
 
@@ -82,23 +82,35 @@ type ExploitResult struct {
 }
 
 type Options struct {
-	Exploit    bool
-	MaxRisk    RiskLevel
-	Vector     string
-	JSON       bool
-	Quiet      bool
-	Rooteame   string
-	Stealth    bool
-	OneShot    bool
-	LHost      string
-	LPort      string
-	DryRun     bool
-	LogFormat  string
-	UpdateGTFO bool
-	NoColor    bool
-	Verbose    bool
-	ListGTFO   bool
-	Report     string
+	Exploit     bool
+	MaxRisk     RiskLevel
+	Vector      string
+	JSON        bool
+	Quiet       bool
+	Rooteame    string
+	Stealth     bool
+	OneShot     bool
+	LHost       string
+	LPort       string
+	DryRun      bool
+	LogFormat   string
+	UpdateGTFO  bool
+	NoColor     bool
+	Verbose     bool
+	ListGTFO    bool
+	Report      string
+	ScanTimeout time.Duration
+}
+
+// scanCmdTimeout returns the timeout applied to external commands run by the
+// scanners (sudo -l, uname, groups, crontab -l, …). It defaults to 5s when
+// Options was built without going through flag parsing (tests, library use),
+// so a zero value can never disable the timeout guard entirely.
+func (o Options) scanCmdTimeout() time.Duration {
+	if o.ScanTimeout > 0 {
+		return o.ScanTimeout
+	}
+	return 5 * time.Second
 }
 
 type AutoPrivilege struct {

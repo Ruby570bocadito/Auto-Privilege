@@ -65,7 +65,7 @@ func usage() {
     --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
   Targeting:
-    --vector list             comma-separated: suid,sudo,cron,passwd,shadow,
+    --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
                               docker,caps,nfs,path,service,kernel,cred
     --risk level              max auto-exploit risk: safe|low|medium|high|danger
     --one-shot                stop after the first successful exploit
@@ -82,6 +82,7 @@ func usage() {
 
   Misc:
     --stealth                 jitter between scanners and exploits
+    --scan-timeout dur        timeout for scan-time external commands (default 5s)
     --rooteame path           load .ko module if root is obtained (lab only)
     --version                 print version
     -h, --help                this help
