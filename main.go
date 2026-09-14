@@ -12,8 +12,6 @@ import (
 func main() {
 	p := run()
 
-	elapsed := time.Since(p.Started)
-
 	// FASE 1: Scan
 	if !p.Opts.Quiet && !p.Opts.JSON {
 		fmt.Println(colorize("  [1/3] Scanning system...", AnsiCyan))
@@ -96,7 +94,19 @@ func main() {
 		}
 	}
 
-	printSummary(p, elapsed)
+	if p.Opts.Output != "" {
+		if err := p.WriteJSONFile(p.Opts.Output); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] output write failed: %v\n", err)
+		} else if !p.Opts.Quiet && !p.Opts.JSON {
+			fmt.Println(colorize("  [+] JSON report written: "+p.Opts.Output, AnsiGreen))
+		}
+	}
+
+	// Elapsed is measured HERE, not right after run(): the old code
+	// captured it before the scan even started, so the printed summary
+	// always showed ~0s on a scan that really took seconds (the JSON was
+	// already correct — it measures at export time).
+	printSummary(p, time.Since(p.Started))
 
 	// Exit codes (documented): 0 = root or scan-only run, 1 = exploit ran
 	// without root, 2 = usage error.
@@ -112,7 +122,7 @@ func run() *AutoPrivilege {
 
 	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
 	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,caps,nfs,path,service,kernel,cred")
+	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred")
 	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
 	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
 	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
@@ -127,6 +137,7 @@ func run() *AutoPrivilege {
 	flag.BoolVar(&opts.Verbose, "verbose", false, "Verbose logging on stderr")
 	flag.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
 	flag.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
+	flag.StringVar(&opts.Output, "output", "", "Write the JSON report to this file (0600)")
 	flag.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 

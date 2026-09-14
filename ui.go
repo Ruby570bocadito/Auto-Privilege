@@ -66,7 +66,7 @@ func usage() {
 
   Targeting:
     --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
-                              docker,caps,nfs,path,service,kernel,cred
+                              docker,container,caps,nfs,path,service,kernel,cred
     --risk level              max auto-exploit risk: safe|low|medium|high|danger
     --one-shot                stop after the first successful exploit
     --lhost ip                reverse-shell listener host (auto-detected)
@@ -74,6 +74,7 @@ func usage() {
 
   Output:
     --json                    machine-readable report on stdout
+    --output file             write the JSON report to a file (0600)
     --report file             also write a markdown evidence report
     --quiet                   no output; exit code 0 = root, 1 = no root
     --no-color                disable ANSI colors (auto-off when piped)
@@ -223,5 +224,8 @@ func printSummary(p *AutoPrivilege, elapsed time.Duration) {
 	fmt.Printf("   %-10s %s\n", "time", elapsed.Round(100*time.Millisecond))
 	if p.Opts.Report != "" {
 		fmt.Printf("   %-10s %s\n", "report", p.Opts.Report)
+	}
+	if p.Opts.Output != "" {
+		fmt.Printf("   %-10s %s\n", "json", p.Opts.Output)
 	}
 }

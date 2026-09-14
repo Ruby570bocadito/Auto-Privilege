@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -824,5 +826,209 @@ func TestScanWritablePathOwnDirsNotFlagged(t *testing.T) {
 		if f.Source == "PATH" {
 			t.Errorf("own PATH dir must not be flagged as planting: %s", f.Target)
 		}
+	}
+}
+
+// --- Ronda 3 — Implementaciones ---
+
+func TestContainerCgroupEvidence(t *testing.T) {
+	got := containerCgroupEvidence("12:cpuset:/docker/abc123def")
+	if len(got) != 1 || got[0] != "docker" {
+		t.Errorf("docker cgroup line must yield exactly [docker], got %v", got)
+	}
+	got = containerCgroupEvidence("0::/kubepods.slice/kubepods-burstable.slice/podXYZ")
+	if len(got) != 1 || got[0] != "kubepods" {
+		t.Errorf("kubepods line must yield exactly [kubepods], got %v", got)
+	}
+	got = containerCgroupEvidence("0::/libpod-pod-42/podman")
+	if len(got) != 2 {
+		t.Errorf("libpod+podman line must yield both hints, got %v", got)
+	}
+	if got := containerCgroupEvidence("0::/system.slice/sshd.service"); got != nil {
+		t.Errorf("plain systemd line must yield no hints, got %v", got)
+	}
+	if got := containerCgroupEvidence(""); got != nil {
+		t.Errorf("empty cgroup data must yield no hints, got %v", got)
+	}
+}
+
+func TestRuntimeForSocket(t *testing.T) {
+	if got := runtimeForSocket("/run/podman/podman.sock"); got != "podman" {
+		t.Errorf("podman socket misnamed: %q", got)
+	}
+	if got := runtimeForSocket("/run/containerd/containerd.sock"); got != "containerd" {
+		t.Errorf("containerd socket misnamed: %q", got)
+	}
+	if got := runtimeForSocket("/tmp/other.sock"); got != "container runtime" {
+		t.Errorf("unknown socket must fall back to generic name, got %q", got)
+	}
+}
+
+func TestContainerSocketPathsExcludeDocker(t *testing.T) {
+	// scanDocker owns docker.sock; a second reporter would duplicate findings.
+	for _, sock := range containerSocketPaths() {
+		if strings.Contains(sock, "docker") {
+			t.Errorf("docker sockets must stay in scanDocker, found %s", sock)
+		}
+	}
+}
+
+func TestEnumerateContainerVectors(t *testing.T) {
+	p := &AutoPrivilege{Opts: Options{}}
+	enumerateContainer(p, Finding{Source: "CONTAINER", Target: "/run/podman/podman.sock", Exploitable: true})
+	enumerateContainer(p, Finding{Source: "CONTAINER", Target: "/run/containerd/containerd.sock", Exploitable: true})
+	enumerateContainer(p, Finding{Source: "CONTAINER", Target: "docker-daemon", Exploitable: true})
+
+	if len(p.Vectors) != 3 {
+		t.Fatalf("expected 3 container vectors, got %d", len(p.Vectors))
+	}
+	if p.Vectors[0].Command != "docker -H unix:///run/podman/podman.sock run --rm -v /:/mnt alpine chroot /mnt /bin/sh" {
+		t.Errorf("podman breakout must drive the docker CLI at the podman socket, got %q", p.Vectors[0].Command)
+	}
+	if !strings.Contains(p.Vectors[1].Command, "ctr --address /run/containerd/containerd.sock") ||
+		!strings.Contains(p.Vectors[1].Command, "src=/,dst=/mnt") {
+		t.Errorf("containerd breakout must use ctr with a host bind mount, got %q", p.Vectors[1].Command)
+	}
+	if p.Vectors[1].Exploit != nil {
+		t.Error("containerd breakout must be a manual vector (no bundled exploit)")
+	}
+	if p.Vectors[2].Exploit == nil {
+		t.Error("docker-daemon breakout must reuse the existing auto-exploit")
+	}
+}
+
+func TestOutputFlagWritesJSON(t *testing.T) {
+	p := &AutoPrivilege{Opts: Options{}}
+	addFinding(p, "SUDO", "ALL", "Full sudo access — instant root", RiskHigh, true)
+	enumerateSUDO(p, Finding{Source: "SUDO", Target: "ALL"})
+
+	path := filepath.Join(t.TempDir(), "report.json")
+	if err := p.WriteJSONFile(path); err != nil {
+		t.Fatalf("WriteJSONFile failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("report not readable: %v", err)
+	}
+	var rep struct {
+		Version string `json:"version"`
+		Summary struct {
+			Findings    int `json:"findings"`
+			Exploitable int `json:"exploitable"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if rep.Summary.Findings != 1 || rep.Summary.Exploitable != 1 {
+		t.Errorf("summary must mirror the scan (1/1), got %+v", rep.Summary)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("report lists escalation paths: perms must be 0600, got %o", perm)
+	}
+}
+
+func TestSetBitRootsIncludeLib64(t *testing.T) {
+	var hasLib64, hasUsrLib64 bool
+	for _, root := range setBitRoots {
+		switch root {
+		case "/lib64":
+			hasLib64 = true
+		case "/usr/lib64":
+			hasUsrLib64 = true
+		}
+	}
+	if !hasLib64 || !hasUsrLib64 {
+		t.Errorf("RHEL/Fedora SUID home missing from walk roots: lib64=%v usr/lib64=%v", hasLib64, hasUsrLib64)
+	}
+}
+
+// --- Ronda 3 — Bugs y Seguridad ---
+
+func TestSummaryTimeReflectsDuration(t *testing.T) {
+	// R17 regression: elapsed used to be captured in main() before the
+	// scan started, so the printed summary always said "time 0s" on runs
+	// that took real seconds. printSummary must render the live duration.
+	setColorMode(false)
+	defer setColorMode(true)
+	p := &AutoPrivilege{Opts: Options{}, Started: time.Now().Add(-2 * time.Second)}
+	out := captureStdout(t, func() {
+		printSummary(p, time.Since(p.Started))
+	})
+	if !strings.Contains(out, "time") {
+		t.Fatalf("summary must contain a time line, got %q", out)
+	}
+	if strings.Contains(out, " 0s") {
+		t.Errorf("summary of a 2s session must not say 0s, got %q", out)
+	}
+	if !strings.Contains(out, "2s") {
+		t.Errorf("summary of a 2s session must say 2s, got %q", out)
+	}
+}
+
+func TestVectorSudoSelectionEnumeratesSudo(t *testing.T) {
+	// R18 regression, half one: --vector=sudo used to enumerate nothing
+	// because the SUDO block lived inside case "sgid".
+	p := &AutoPrivilege{Opts: Options{}}
+	addFinding(p, "SUDO", "ALL", "Full sudo access — instant root", RiskHigh, true)
+	enumerateVectors(p, []string{"sudo"})
+	if len(p.Vectors) != 1 {
+		t.Fatalf("--vector=sudo must enumerate the SUDO finding, got %d vectors", len(p.Vectors))
+	}
+	if p.Vectors[0].Name != "sudo ALL" {
+		t.Errorf("expected the sudo ALL vector, got %q", p.Vectors[0].Name)
+	}
+}
+
+func TestVectorSgidSelectionExcludesSudo(t *testing.T) {
+	// R18 regression, half two: --vector=sgid used to drag SUDO vectors in.
+	p := &AutoPrivilege{Opts: Options{}}
+	addFinding(p, "SUDO", "ALL", "Full sudo access — instant root", RiskHigh, true)
+	enumerateVectors(p, []string{"sgid"})
+	if len(p.Vectors) != 0 {
+		t.Errorf("--vector=sgid must not produce SUDO vectors, got %d", len(p.Vectors))
+	}
+}
+
+func TestCurrentUsernameIgnoresLyingEnv(t *testing.T) {
+	// R19 regression guard: scanSudo now resolves the user through
+	// currentUsername(), which must prefer user.Current() over the
+	// USER/LOGNAME env vars that su/sudo leave stale.
+	u, err := user.Current()
+	if err != nil {
+		t.Skip("user.Current() unavailable in this sandbox")
+	}
+	t.Setenv("USER", "victim")
+	t.Setenv("LOGNAME", "victim")
+	if got := currentUsername(); got == "victim" {
+		t.Errorf("currentUsername must not trust a lying USER env (real: %s), got %q", u.Username, got)
+	}
+	if got := currentUsername(); got != u.Username {
+		t.Errorf("currentUsername must resolve the real user %q, got %q", u.Username, got)
+	}
+}
+
+func TestQuietSuppressesWarnings(t *testing.T) {
+	// R23 regression: the documented --quiet contract is "no output; exit
+	// code only", but WARN lines (exploit skips, dry-run notice) used to
+	// leak to stderr. Everything below ERROR must be gone in quiet mode.
+	setColorMode(false)
+	defer setColorMode(true)
+	out := captureStderr(t, func() {
+		log(LogWarn, "exploit", "Skipped something (risk exceeds max)", "", Options{Quiet: true})
+		log(LogInfo, "scanner", "Starting system scan...", "", Options{Quiet: true, Verbose: true})
+	})
+	if out != "" {
+		t.Errorf("--quiet must suppress WARN and INFO logs, got %q", out)
+	}
+	errOut := captureStderr(t, func() {
+		log(LogError, "exploit", "Exploit failed: test", "boom", Options{Quiet: true})
+	})
+	if !strings.Contains(errOut, "[ERROR]") {
+		t.Errorf("ERROR logs must stay visible in quiet mode (failure diagnostics), got %q", errOut)
 	}
 }

@@ -19,8 +19,8 @@ import (
 
 var scannerOrder = []func(*AutoPrivilege){
 	scanSetBits, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
-	scanCapabilities, scanFileCaps, scanNFS, scanWritablePath, scanServices,
-	scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
+	scanContainers, scanCapabilities, scanFileCaps, scanNFS, scanWritablePath,
+	scanServices, scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
 }
 
 func scanAll(p *AutoPrivilege) {
@@ -82,9 +82,15 @@ func classifySGID(bin string, ownerGID uint32) (risk RiskLevel, exploitable bool
 }
 
 // setBitRoots are the directory trees walked for SUID/SGID files.
+// /usr/lib64 and /lib64 close the RHEL/Fedora gap (dbus-daemon-launch-helper
+// and friends live there). On merged-usr distros /lib64 is a symlink to
+// usr/lib64: the walk skips symlinks and the real-path dedup collapses any
+// aliasing, so both entries are safe everywhere. Cost measured this round:
+// ~1 ms for an empty /usr/lib64 here, one extra shallow tree at worst.
 var setBitRoots = []string{
 	"/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local/bin",
 	"/usr/local/sbin", "/snap/bin", "/opt", "/usr/lib", "/usr/libexec",
+	"/usr/lib64", "/lib64",
 }
 
 // maxSetBitDepth bounds the recursive walk so a pathological tree (or a
@@ -190,10 +196,11 @@ func reportSetBit(p *AutoPrivilege, kind, bin, full string, ownerID uint32, risk
 
 // --- Sudo ---
 func scanSudo(p *AutoPrivilege) {
-	user := os.Getenv("USER")
-	if user == "" {
-		user = os.Getenv("LOGNAME")
-	}
+	// Canonical resolver: under su/sudo -s the USER env var lies (it keeps
+	// pointing at the pre-su user, or disappears), and `groups <wrong>`
+	// silently kills the sudo/wheel group check below. scanDocker already
+	// used currentUsername(); this scanner now matches the standard.
+	user := currentUsername()
 
 	// sudo -n fails fast instead of prompting for a password (the old
 	// `sudo -l` fallback hung forever in labs without a password).
@@ -376,6 +383,98 @@ func scanDocker(p *AutoPrivilege) {
 				"Writable docker socket — container breakout to root",
 				RiskHigh, true)
 		}
+	}
+}
+
+// --- Containers ---
+// containerSocketPaths lists the unix sockets of the non-docker container
+// runtimes. The docker socket is intentionally absent: scanDocker already
+// owns it (group membership + writability) and a second reporter would
+// duplicate every docker finding.
+func containerSocketPaths() []string {
+	return []string{
+		"/var/run/podman/podman.sock",
+		"/run/podman/podman.sock",
+		"/run/containerd/containerd.sock",
+		"/var/run/containerd/containerd.sock",
+	}
+}
+
+// runtimeForSocket names the runtime behind a socket path for finding text.
+func runtimeForSocket(sock string) string {
+	switch {
+	case strings.Contains(sock, "podman"):
+		return "podman"
+	case strings.Contains(sock, "containerd"):
+		return "containerd"
+	default:
+		return "container runtime"
+	}
+}
+
+// containerCgroupEvidence extracts runtime hints from cgroup data. Kept pure
+// (string in, hints out) so the heuristic is testable without a container.
+func containerCgroupEvidence(cgroup string) []string {
+	var found []string
+	lower := strings.ToLower(cgroup)
+	for _, hint := range []string{"docker", "containerd", "kubepods", "libpod", "podman", "lxc"} {
+		if strings.Contains(lower, hint) {
+			found = append(found, hint)
+		}
+	}
+	return found
+}
+
+// scanContainers reports the container context the tool itself runs in and
+// the container-runtime breakout surfaces around it. Honesty rules: the
+// "inside a container" indicator never claims escalation by itself (the
+// breakout technique must come from a reachable runtime), and the daemon CLI
+// check notes that rootless runtimes contain the classic breakout.
+func scanContainers(p *AutoPrivilege) {
+	var evidence []string
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		evidence = append(evidence, "/.dockerenv present")
+	}
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, hint := range containerCgroupEvidence(string(data)) {
+			evidence = append(evidence, "cgroup hint "+hint)
+		}
+	}
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		evidence = append(evidence, "kubernetes service env")
+	}
+	if len(evidence) > 0 {
+		addFinding(p, "CONTAINER", "self",
+			fmt.Sprintf("Running inside a container (%s) — breakout needs a reachable runtime socket or a privileged runtime",
+				strings.Join(evidence, ", ")),
+			RiskMedium, false)
+	}
+
+	for _, sock := range containerSocketPaths() {
+		info, err := os.Lstat(sock)
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		if isWritableByCurrentUser(sock) {
+			addFinding(p, "CONTAINER", sock,
+				fmt.Sprintf("Writable %s socket — host breakout via privileged container", runtimeForSocket(sock)),
+				RiskHigh, true)
+		} else {
+			addFinding(p, "CONTAINER", sock,
+				fmt.Sprintf("%s socket present (not writable by current user)", runtimeForSocket(sock)),
+				RiskLow, false)
+		}
+	}
+
+	// A docker CLI that actually reaches a daemon is a breakout vector on
+	// its own: it can start a privileged container mounting the host root.
+	// scanDocker covers group membership and the raw socket; this also
+	// covers DOCKER_HOST / oddly-permissioned setups.
+	if out, err := runCmdOut(p.Opts.scanCmdTimeout(), "docker", "ps"); err == nil {
+		_ = out
+		addFinding(p, "CONTAINER", "docker-daemon",
+			"docker CLI reaches a live daemon — container breakout available (verify rootful vs rootless)",
+			RiskHigh, true)
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-const Version = "1.3.0"
+const Version = "1.4.0"
 
 type RiskLevel int
 
@@ -99,6 +99,7 @@ type Options struct {
 	Verbose     bool
 	ListGTFO    bool
 	Report      string
+	Output      string
 	ScanTimeout time.Duration
 }
 

@@ -95,6 +95,18 @@ func (p *AutoPrivilege) ExportJSON() error {
 	return nil
 }
 
+// WriteJSONFile saves the exact document --json prints, without depending on
+// shell redirection (the backlog use case: cron jobs and CI pipelines that
+// cannot pipe safely). Perms 0600: the report lists escalation paths and
+// credentials-adjacent targets, so it must never be group/world readable.
+func (p *AutoPrivilege) WriteJSONFile(path string) error {
+	data, err := marshalJSON(buildReport(p))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
 // WriteMarkdownReport saves a human-readable evidence report with every
 // finding, every vector and the exact commands an operator can run by hand.
 func (p *AutoPrivilege) WriteMarkdownReport(path string) error {

