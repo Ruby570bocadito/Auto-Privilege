@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-const Version = "1.6.0"
+const Version = "1.7.0"
 
 type RiskLevel int
 
@@ -107,6 +107,12 @@ type Options struct {
 	// library use may set them directly.
 	FailOnRisk    RiskLevel
 	FailOnEnabled bool
+	// Sarif is the --sarif output path (empty = no SARIF export).
+	Sarif string
+	// Parallel runs the scanners concurrently; the merged findings keep
+	// the exact scannerOrder sequence, so results are byte-identical to a
+	// sequential run (tested). Stealth forces sequential regardless.
+	Parallel bool
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the

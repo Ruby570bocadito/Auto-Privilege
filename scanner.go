@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -22,16 +23,45 @@ var scannerOrder = []func(*AutoPrivilege){
 	scanSetBits, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
 	scanContainers, scanCapabilities, scanFileCaps, scanNFS, scanWritablePath,
 	scanServices, scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
-	scanPreload,
+	scanPreload, scanGroup, scanLoginHooks,
 }
 
 func scanAll(p *AutoPrivilege) {
 	logScanStart(p.Opts)
-	for _, scanner := range scannerOrder {
-		scanner(p)
-		if p.Opts.Stealth {
-			time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
+	// --parallel runs the scanners concurrently to cut wall-clock time
+	// (getcap -r alone can eat the whole budget on binary-heavy hosts).
+	// Each goroutine scans into a PRIVATE AutoPrivilege whose Findings
+	// slice it owns — scanners only ever append to p.Findings and read
+	// p.Opts, so the shallow copy is the entire synchronization story —
+	// and the merge walks scannerOrder in index order: the merged slice
+	// is byte-identical to a sequential run, which the diff/gate/markdown
+	// contracts depend on (TestScanAllParallelDeterministic pins it, and
+	// the suite is race-clean under -race). --stealth forces sequential:
+	// its jitter exists precisely to pace host-visible probes.
+	if !p.Opts.Parallel || p.Opts.Stealth {
+		for _, scanner := range scannerOrder {
+			scanner(p)
+			if p.Opts.Stealth {
+				time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
+			}
 		}
+		return
+	}
+
+	perScanner := make([][]Finding, len(scannerOrder))
+	var wg sync.WaitGroup
+	for i, scanner := range scannerOrder {
+		wg.Add(1)
+		go func(idx int, fn func(*AutoPrivilege)) {
+			defer wg.Done()
+			lp := &AutoPrivilege{Opts: p.Opts, Started: p.Started}
+			fn(lp)
+			perScanner[idx] = lp.Findings
+		}(i, scanner)
+	}
+	wg.Wait()
+	for _, findings := range perScanner {
+		p.Findings = append(p.Findings, findings...)
 	}
 }
 
@@ -307,12 +337,18 @@ func scanCron(p *AutoPrivilege) {
 				continue
 			}
 			// Check if we can actually write
-			if !isWritableByCurrentUser(full) {
+			if isWritableByCurrentUser(full) {
+				addFinding(p, "CRON", full,
+					"Writable cron job — inject command",
+					RiskHigh, true)
 				continue
 			}
-			addFinding(p, "CRON", full,
-				"Writable cron job — inject command",
-				RiskHigh, true)
+			// Not writable: the root-run schedule can still be
+			// abused through wildcard-absorption (see the heuristic
+			// below) — read-only content analysis, nothing executed.
+			if isReadable(full) {
+				scanCronWildcards(p, full)
+			}
 		}
 	}
 
@@ -339,6 +375,68 @@ func scanCron(p *AutoPrivilege) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// wildcardProneBins are the archivers/synchronizers whose GTFOBins tricks
+// absorb filenames as arguments: when a root cron runs `tar cf backup.tar *`
+// in a directory where the user can create files, crafted filenames become
+// the missing arguments (the classic --checkpoint-action injection). Only
+// these four families are flagged — the heuristic stays honest by refusing
+// to guess about binaries with no such technique.
+var wildcardProneBins = map[string]bool{
+	"tar": true, "rsync": true, "zip": true, "7z": true,
+}
+
+// cronWildcardLine inspects one cron line (already comment/blank-stripped)
+// for a wildcard-prone binary invoked with a literal `*` argument. It works
+// for both schedule shapes: /etc/cron.d lines (5 time fields + command) and
+// the bare commands of cron.hourly/daily/weekly/monthly. Returns the binary
+// name so the finding can name the technique. Pure function — fully
+// table-testable without a cron installation.
+func cronWildcardLine(line string) (string, bool) {
+	fields := strings.Fields(line)
+	// A schedule-prefixed line has at least 6 fields; a bare command has
+	// at least 2 (binary + wildcard). Either way the command must appear
+	// with a `*` argument somewhere after it.
+	for i, f := range fields {
+		base := filepath.Base(f)
+		if !wildcardProneBins[base] {
+			continue
+		}
+		for _, arg := range fields[i+1:] {
+			if arg == "*" || strings.Contains(arg, "*") {
+				return base, true
+			}
+		}
+	}
+	return "", false
+}
+
+// scanCronWildcards reports wildcard-injection CANDIDATES in a root cron
+// file. Honest risk accounting: the schedule runs as root, but the classic
+// trick also needs a writable working directory for the crafted filenames,
+// and cron's cwd is the cron file's location only for spool entries — the
+// tool cannot know it from here. So the finding is MEDIUM, exploitable=
+// false: an investigation lead with the exact verification step spelled out.
+// The user's own `crontab -l` output is deliberately NOT scanned for this:
+// user crontabs run as their owner — no root schedule, no injection.
+func scanCronWildcards(p *AutoPrivilege, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if bin, ok := cronWildcardLine(line); ok {
+			addFinding(p, "CRON", path,
+				fmt.Sprintf("root cron runs %s with wildcard arguments — file-absorption injection IF its working directory is user-writable (verify)", bin),
+				RiskMedium, false)
+			break // one candidate per file keeps the report noise-free
 		}
 	}
 }
@@ -673,8 +771,60 @@ func scanNFS(p *AutoPrivilege) {
 			addFinding(p, "NFS", line,
 				"NFS export with no_root_squash — mount and own files as root",
 				RiskHigh, true)
+			continue
+		}
+		// no_root_squash is the worst case, but an rw export with an
+		// unrestricted client list is its quieter sibling: every host
+		// that can reach the port can mount and (with a matching uid)
+		// write. Config weakness, not a direct path for the current
+		// user — MEDIUM, informational.
+		if nfsExportHostless(line) {
+			addFinding(p, "NFS", line,
+				"NFS export rw without host restriction — any client may mount",
+				RiskMedium, false)
 		}
 	}
+}
+
+// nfsExportHostless reports whether an /etc/exports line grants rw to an
+// unrestricted client list: `*(rw,...)` (the wildcard host) or a bare
+// `(rw,...)` group (empty host = world). Options-only lines without rw,
+// host-qualified exports and the literal "ro" case all stay silent.
+// Pure function — table-testable without an NFS server.
+func nfsExportHostless(line string) bool {
+	// /etc/exports grammar: path client(options) client(options)…
+	// The export path is field 0; every other field is a client spec.
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return false
+	}
+	for _, client := range fields[1:] {
+		if client == "" {
+			continue
+		}
+		unrestricted := strings.HasPrefix(client, "*(") || strings.HasPrefix(client, "(")
+		if !unrestricted {
+			continue
+		}
+		// rw present and not ro: scanning the option group only —
+		// a substring search over the whole line would false-positive
+		// on a host named "rw-host".
+		opts := strings.TrimPrefix(strings.TrimPrefix(client, "*"), "(")
+		opts = strings.TrimSuffix(opts, ")")
+		hasRW, hasRO := false, false
+		for _, opt := range strings.Split(opts, ",") {
+			switch strings.TrimSpace(opt) {
+			case "rw":
+				hasRW = true
+			case "ro":
+				hasRO = true
+			}
+		}
+		if hasRW && !hasRO {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Writable PATH entries ---
@@ -1016,10 +1166,56 @@ func scanPreloadPaths(p *AutoPrivilege, preloadPath, sudoersPath, sudoersDir str
 			"Writable /etc/sudoers — append a NOPASSWD ALL rule",
 			RiskHigh, true)
 	}
-	if info, err := os.Lstat(sudoersDir); err == nil && info.IsDir() && isWritableByCurrentUser(sudoersDir) {
-		addFinding(p, "SUDOERS", sudoersDir,
-			"Writable /etc/sudoers.d — drop-in rule possible (sudo requires root-owned files)",
-			RiskHigh, true)
+	if info, err := os.Lstat(sudoersDir); err == nil && info.IsDir() {
+		if isWritableByCurrentUser(sudoersDir) {
+			addFinding(p, "SUDOERS", sudoersDir,
+				"Writable /etc/sudoers.d — drop-in rule possible (sudo requires root-owned files)",
+				RiskHigh, true)
+		} else {
+			// Directory locked down, but the drop-ins themselves can
+			// still be abnormal: sudo only honors root-owned, non-
+			// group/world-writable files, so a root-owned file the
+			// current user can nevertheless write (ACLs, freak perms)
+			// is the ONE per-file case worth surfacing. User-owned
+			// files are ignored by sudo by design — flagging them
+			// would be noise, so the uid check gates the finding.
+			scanSudoersDropins(p, sudoersDir)
+		}
+	}
+}
+
+// scanSudoersDropins inspects the individual files of a non-writable
+// /etc/sudoers.d for the root-owned-and-user-writable combination. Honest
+// risk level: HIGH would overstate it (sudo's visudo check still validates
+// the file — an abnormal-perms file may be rejected outright), so this is
+// MEDIUM informational with the verification step named. Runs only when the
+// parent directory itself is NOT writable: the dir finding already covers
+// the write-anywhere case and duplication would double-report every drop-in.
+func scanSudoersDropins(p *AutoPrivilege, sudoersDir string) {
+	entries, err := os.ReadDir(sudoersDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		full := filepath.Join(sudoersDir, e.Name())
+		fi, err := os.Lstat(full)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		if !isWritableByCurrentUser(full) {
+			continue
+		}
+		stat, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != 0 {
+			// Not root-owned: sudo ignores it entirely — honest silence.
+			continue
+		}
+		addFinding(p, "SUDOERS", full,
+			"Root-owned writable sudoers.d drop-in (ACL/abnormal perms) — verify with visudo -c whether sudo still honors it",
+			RiskMedium, false)
 	}
 }
 
@@ -1034,6 +1230,83 @@ func countPreloadEntries(content string) int {
 		}
 	}
 	return n
+}
+
+// --- Group database + login hooks (session-time root surfaces) ---
+// groupPath/loginHookPaths exist so tests can point the scanners at
+// synthetic files; production code always sees the real /etc locations.
+var groupPath = "/etc/group"
+
+var loginHookPaths = struct {
+	environment string
+	profileD    string
+	profile     string
+	bashrc      string
+}{
+	environment: "/etc/environment",
+	profileD:    "/etc/profile.d",
+	profile:     "/etc/profile",
+	bashrc:      "/etc/bash.bashrc",
+}
+
+// scanGroup flags a writable /etc/group. The group database governs
+// membership in sudo/wheel/docker — a user who can append a line can grant
+// himself any of those groups, and the grant takes effect on the next login
+// session. Running as root the check is meaningless (root needs no group
+// help), so it short-circuits like scanWritablePath — without the guard
+// every check would trip and the finding would be pure noise.
+func scanGroup(p *AutoPrivilege) {
+	if os.Geteuid() == 0 {
+		return
+	}
+	if !isWritableByCurrentUser(groupPath) {
+		return
+	}
+	addFinding(p, "GROUP", groupPath,
+		"Writable /etc/group — append yourself to sudo/wheel/docker (effective on next login)",
+		RiskHigh, true)
+}
+
+// scanLoginHooks flags writable login-time execution surfaces: files and
+// directories whose contents run inside every future login shell — root's
+// included. /etc/environment is the sharpest of the set (its variables are
+// process-wide, so LD_PRELOAD there injects a shared object into every
+// login session, not just shells). All are HIGH exploitable when writable:
+// the payload is a plain append, no compilation, no schedule, no waiting
+// for a misconfiguration — only for the next login.
+func scanLoginHooks(p *AutoPrivilege) {
+	if info, err := os.Lstat(loginHookPaths.environment); err == nil && info.Mode().IsRegular() {
+		if isWritableByCurrentUser(loginHookPaths.environment) {
+			addFinding(p, "HOOKS", loginHookPaths.environment,
+				"Writable /etc/environment — LD_PRELOAD injected into every login session (root included)",
+				RiskHigh, true)
+		}
+	}
+	scanLoginHookPath(p, loginHookPaths.profileD, true,
+		"Writable /etc/profile.d — code runs in every login shell (root included)")
+	scanLoginHookPath(p, loginHookPaths.profile, false,
+		"Writable /etc/profile — code runs in every login shell (root included)")
+	scanLoginHookPath(p, loginHookPaths.bashrc, false,
+		"Writable /etc/bash.bashrc — code runs in every interactive bash (root included)")
+}
+
+// scanLoginHookPath reports one login hook location: a directory (like
+// /etc/profile.d, where any dropped .sh becomes login code) or a single
+// script file. Missing or permission-denied locations stay silent.
+func scanLoginHookPath(p *AutoPrivilege, path string, isDir bool, desc string) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return
+	}
+	if isDir != info.IsDir() {
+		// Shape mismatch (e.g. profile.d replaced by a plain file):
+		// the honest answer for the directory-shaped probe is silence;
+		// the file case is covered by its own entry.
+		return
+	}
+	if isWritableByCurrentUser(path) {
+		addFinding(p, "HOOKS", path, desc, RiskHigh, true)
+	}
 }
 
 // --- Credential scanning ---

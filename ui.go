@@ -67,7 +67,7 @@ func usage() {
   Targeting:
     --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
                               docker,container,caps,nfs,path,service,kernel,cred,
-                              preload,sudoers,all
+                              preload,sudoers,group,hooks,all
     --risk level              max auto-exploit risk: safe|low|medium|high|danger
     --one-shot                stop after the first successful exploit
     --lhost ip                reverse-shell listener host (auto-detected)
@@ -77,6 +77,7 @@ func usage() {
     --json                    machine-readable report on stdout
     --output file             write the JSON report to a file (0600)
     --report file             also write a markdown evidence report
+    --sarif file              SARIF 2.1.0 report for code-scanning dashboards
     --baseline file           diff findings against a previous --json/--output report
     --quiet                   no output; exit code 0 = root, 1 = no root
     --no-color                disable ANSI colors (auto-off when piped)
@@ -84,6 +85,7 @@ func usage() {
     --log fmt                 log format: text|json (stderr)
 
   Misc:
+    --parallel                run scanners concurrently (same results, faster)
     --stealth                 jitter between scanners and exploits
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
     --fail-on risk            exit 3 when exploitable findings >= risk
@@ -94,10 +96,12 @@ func usage() {
 
   Examples:
     autoprivilege                          read-only audit of this machine
+    autoprivilege --parallel               same audit, scanners concurrent
     autoprivilege --exploit --risk=low     only the safest auto-exploits
     autoprivilege --vector=suid,sudo       focus two specific vectors
     autoprivilege --json > report.json     CI-friendly output
     autoprivilege --report audit.md        markdown evidence report
+    autoprivilege --sarif audit.sarif      GitHub code-scanning upload
     autoprivilege --output base.json       snapshot, then harden, then:
     autoprivilege --baseline base.json     show new/resolved findings
     autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high
@@ -139,6 +143,14 @@ func printDiffSummary(p *AutoPrivilege) {
 	fmt.Println(colorize("  ── Diff vs baseline ─────────────────────", AnsiCyan))
 	fmt.Printf("   %-10s %d  (%s %d)\n", "new", len(p.Diff.New), "exploitable", p.Diff.NewExploitable)
 	fmt.Printf("   %-10s %d\n", "resolved", len(p.Diff.Resolved))
+	// Score trajectory across the baseline. Baselines written before the
+	// metric existed carry score 0 — "unknown" is the honest rendering
+	// there, a fabricated 0→X would read as a catastrophic regression.
+	if p.Diff.SummaryBefore.Score > 0 {
+		fmt.Printf("   %-10s %d → %d\n", "score", p.Diff.SummaryBefore.Score, p.Diff.ScoreAfter)
+	} else {
+		fmt.Printf("   %-10s %d (%s)\n", "score", p.Diff.ScoreAfter, "baseline predates scoring")
+	}
 	for _, f := range p.Diff.New {
 		p.Print(f)
 	}
@@ -256,6 +268,7 @@ func printSummary(p *AutoPrivilege, elapsed time.Duration) {
 	fmt.Println()
 	fmt.Println(colorize("  ── Summary ─────────────────────────────", AnsiCyan))
 	fmt.Printf("   %-10s %d  (%s %d)\n", "findings", len(p.Findings), "exploitable", exploitable)
+	fmt.Printf("   %-10s %d/100\n", "score", hardeningScore(p.Findings))
 	fmt.Printf("   %-10s %d  (%s %d · %s %d)\n", "vectors", len(p.Vectors), "auto", auto, "manual", manual)
 	fmt.Printf("   %-10s %s\n", "risks", strings.TrimRight(riskLine, " "))
 	fmt.Printf("   %-10s %s\n", "rooted", rooted)

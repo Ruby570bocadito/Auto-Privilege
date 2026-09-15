@@ -110,6 +110,14 @@ func main() {
 		}
 	}
 
+	if p.Opts.Sarif != "" {
+		if err := p.WriteSARIFFile(p.Opts.Sarif); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] sarif write failed: %v\n", err)
+		} else if !p.Opts.Quiet && !p.Opts.JSON {
+			fmt.Println(colorize("  [+] SARIF report written: "+p.Opts.Sarif, AnsiGreen))
+		}
+	}
+
 	// Elapsed is measured HERE, not right after run(): the old code
 	// captured it before the scan even started, so the printed summary
 	// always showed ~0s on a scan that really took seconds (the JSON was
@@ -148,7 +156,7 @@ func run() *AutoPrivilege {
 
 	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
 	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers")
+	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers,group,hooks")
 	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
 	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
 	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
@@ -166,6 +174,8 @@ func run() *AutoPrivilege {
 	flag.StringVar(&opts.Output, "output", "", "Write the JSON report to this file (0600)")
 	flag.StringVar(&opts.Baseline, "baseline", "", "Diff findings against a previous --json/--output report")
 	flag.StringVar(&opts.FailOn, "fail-on", "", "Exit 3 if any exploitable finding at/above this risk: low, medium, high, danger")
+	flag.StringVar(&opts.Sarif, "sarif", "", "Write a SARIF 2.1.0 report for code-scanning dashboards (GitHub/GitLab)")
+	flag.BoolVar(&opts.Parallel, "parallel", false, "Run scanners concurrently (results identical to sequential)")
 	flag.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 

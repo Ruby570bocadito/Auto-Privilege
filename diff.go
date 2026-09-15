@@ -23,6 +23,7 @@ type ReportDiff struct {
 	New            []Finding   `json:"new"`
 	Resolved       []Finding   `json:"resolved"`
 	NewExploitable int         `json:"new_exploitable"`
+	ScoreAfter     int         `json:"score_after"`
 	SummaryBefore  jsonSummary `json:"summary_before"`
 }
 
@@ -67,6 +68,7 @@ func diffReports(before *jsonReport, current []Finding) *ReportDiff {
 		BaselineDate:  before.Timestamp,
 		New:           []Finding{},
 		Resolved:      []Finding{},
+		ScoreAfter:    hardeningScore(current),
 		SummaryBefore: before.Summary,
 	}
 	// Mirror buildSummary's convention: Risks never renders as null.

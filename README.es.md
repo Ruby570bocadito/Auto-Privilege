@@ -28,12 +28,13 @@ Todo en ella es deliberadamente honesto. Los vectores que no puede verificar aut
 
 | | |
 |---|---|
-| **18 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible, inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS, directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud, `ld.so.preload`, sudoers escribible |
+| **20 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible (+ candidatos de inyección wildcard), inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS (no_root_squash + exports rw sin host), directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud, `ld.so.preload`, sudoers escribible (fichero, directorio y drop-ins por fichero), `/etc/group` escribible, hooks de login escribibles (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`) |
 | **75 técnicas GTFOBins + 31 sgid** | embebidas en el binario — funciona air-gapped; actualizable desde upstream con un comando (`--list-gtfo` muestra la sección sgid) |
+| **Score de endurecimiento** | cada escaneo termina con una cifra determinista 0–100 de postura — ponderada por riesgo y explotabilidad — para que los diffs `--baseline` lean `score 60 → 85` en lugar de recuentos crudos |
 | **Auto-explotación de más seguro a más agresivo** | técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root |
-| **Dos modos de salida** | terminal humano con rampa de color, o `--json` para máquinas (`--output fichero` lo persiste, 0600); `--report` markdown opcional con evidencias |
+| **Cuatro formatos de salida** | terminal humano con rampa de color, `--json` para máquinas (`--output fichero` lo persiste, 0600), `--report` markdown con evidencias, y `--sarif` para los dashboards de code-scanning de GitHub/GitLab |
 | **Laboratorio rootless** | `lab/rootless_lab.sh` monta una caja fake-vulnerable dentro de un user namespace — sin Docker, sin root real, no toca tu sistema |
-| **Amigable para scripts** | `--quiet` + códigos de salida (`0` root, `1` sin root, `2` error, `3` puerta de política), `--no-color` automático al pipear, `NO_COLOR` respetado |
+| **Amigable para scripts** | `--quiet` + códigos de salida (`0` root, `1` sin root, `2` error, `3` puerta de política), `--no-color` automático al pipear, `NO_COLOR` respetado, `--parallel` recorta el tiempo de escaneo con resultados byte-idénticos |
 
 ## Cómo funciona
 
@@ -84,7 +85,7 @@ Modos:
 Filtrado:
   --vector lista            separada por comas: suid,sgid,sudo,cron,passwd,shadow,
                             docker,container,caps,nfs,path,service,kernel,cred,
-                            preload,sudoers,all
+                            preload,sudoers,group,hooks,all
   --risk nivel              riesgo máximo de auto-explotación: safe|low|medium|high|danger
   --one-shot                parar tras el primer exploit exitoso
   --lhost ip                host del listener de reverse-shell (autodetectado)
@@ -94,6 +95,7 @@ Salida:
   --json                    informe legible por máquina en stdout
   --output fichero          escribe el informe JSON a un fichero (0600)
   --report fichero          escribe además un informe markdown con evidencias
+  --sarif fichero           informe SARIF 2.1.0 para dashboards de code-scanning
   --baseline fichero        compara los hallazgos contra un informe previo --json/--output
   --quiet                   sin salida; código 0 = root, 1 = sin root
   --no-color                desactiva colores ANSI (auto al pipear)
@@ -101,6 +103,7 @@ Salida:
   --log fmt                 formato de log: text|json (stderr)
 
 Varios:
+  --parallel                ejecuta los escáneres en paralelo (mismos resultados, más rápido)
   --stealth                 jitter entre escáneres y exploits
   --scan-timeout dur        timeout para comandos externos del escaneo (por defecto 5s)
   --fail-on riesgo          código 3 si hay hallazgos explotables >= riesgo
@@ -119,19 +122,21 @@ Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ej
 | `suid` | Binarios SUID (walk recursivo) + coincidencia GTFOBins (`python3`, `find`, ...) | sí |
 | `sgid` | Binarios SGID con grupo root — escalación de grupo, vector manual (técnica `sgid` de GTFOBins preferente; el fallback SUID se declara en la nota) | manual |
 | `sudo` | reglas sudo -l, entradas NOPASSWD, CVEs por versión de sudo (rango Baron Samedit) | parcial |
-| `cron` | `/etc/cron*` escribible, jobs cron con PATH | sí |
+| `cron` | `/etc/cron*` escribible, jobs cron con PATH, candidatos de inyección wildcard en schedules de root (`tar`/`rsync`/`zip`/`7z` con argumentos `*`) | sí |
 | `passwd` | `/etc/passwd` escribible — inyección de usuario root | sí |
 | `shadow` | `/etc/shadow` legible — extracción de hashes | sí |
 | `docker` | grupo docker / acceso al socket → root del host | parcial |
 | `container` | indicador del contenedor actual con evidencia de privilegio/namespace de PID, sockets podman/containerd, daemon docker alcanzable | parcial |
 | `caps` | procesos cap_setuid, file capabilities (`getcap -r /`) | sí |
-| `nfs` | exports no_root_squash | manual |
+| `nfs` | exports `no_root_squash` (explotable) y exports `rw` sin restricción de host (informativo) | manual |
 | `path` | directorios escribibles en el PATH de root | sí |
 | `service` | unidades systemd escribibles / secuestro PathChanged | sí |
 | `kernel` | CVEs por rango de kernel: Dirty Pipe, Dirty Cow, OverlayFS, StackRot, nf_tables; PwnKit vía pkexec | parcial |
 | `cred` | contraseñas en history, configs, metadata cloud (imds, timeout 800 ms) | sí |
 | `preload` | `/etc/ld.so.preload` no vacío (se carga con euid 0 en cada binario SUID) — HIGH/explotable si es escribible, informativo si no | manual |
-| `sudoers` | `/etc/sudoers` escribible (añadir regla NOPASSWD, auto) o `/etc/sudoers.d` escribible (drop-in, manual: sudo exige ficheros de root) | parcial |
+| `sudoers` | `/etc/sudoers` escribible (añadir regla NOPASSWD, auto) o `/etc/sudoers.d` escribible (drop-in, manual: sudo exige ficheros de root); el pase por fichero también detecta drop-ins root-owned escribibles tras un directorio cerrado | parcial |
+| `group` | `/etc/group` escribible — añádete a sudo/wheel/docker, efectivo en el próximo login | manual |
+| `hooks` | hooks de login escribibles: `/etc/environment` (LD_PRELOAD en cada sesión), `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc` | manual |
 
 `parcial` significa que AUTOPRIV prepara el terreno (checks de versión, parseo de reglas) pero un humano confirma el paso final — la herramienta lo dice en vez de fingirlo.
 
@@ -154,6 +159,7 @@ Los sondeos `docker`/`container` heredan el entorno de tu shell, así que un dae
 
   ── Summary ─────────────────────────────
    findings   12  (exploitable 9)
+   score      31/100
    vectors    9  (auto 6 · manual 3)
    risks      LOW 3  MEDIUM 1  HIGH 7  DANGER 1
    rooted     YES
@@ -167,6 +173,7 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 {
   "findings": 12,
   "exploitable": 9,
+  "score": 31,
   "vectors": 9,
   "auto": 6,
   "manual": 3,
@@ -175,9 +182,11 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 }
 ```
 
-**Markdown** (`--report audit.md`) — una tabla resumen con los totales de un vistazo (hallazgos, explotables, vectores auto/manual, distribución de riesgos) y después secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
+**Markdown** (`--report audit.md`) — una tabla resumen con los totales de un vistazo (hallazgos, explotables, score de endurecimiento, vectores auto/manual, distribución de riesgos) y después secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
 
-**Diff contra baseline** (`--baseline prev.json`) — el ciclo de endurecimiento, cerrado: haz una instantánea con `--output base.json`, corrige lo que puedas, vuelve a escanear contra la instantánea y la herramienta clasifica cada hallazgo como **nuevo** (la superficie creció) o **resuelto** (el arreglo funcionó), con clave fuente+objetivo para que un reordenado o un cambio de redacción nunca finja un cambio. El diff aparece en el terminal, en el JSON (clave `"diff"` con `new`/`resolved`/`new_exploitable`/`summary_before`) y en una sección `## Diff vs baseline` del reporte markdown:
+**SARIF** (`--sarif audit.sarif`) — los hallazgos vestidos de log SARIF 2.1.0, el formato que el tab de code-scanning de GitHub, GitLab y cualquier visor SARIF ingieren de forma nativa: una regla por fuente de hallazgo, niveles `error`/`warning`/`note` mapeados desde la escala de riesgo, ubicaciones `file://` para targets que son rutas (los targets no-ruta como `ALL` o los CVE ids se incrustan en el mensaje). Escrito a 0600 como el resto de artefactos. Súbelo con `github/codeql-action/upload-sarif@v3` y el escaneo aparece en la pestaña Security — sin conversores, sin dependencias externas.
+
+**Diff contra baseline** (`--baseline prev.json`) — el ciclo de endurecimiento, cerrado: haz una instantánea con `--output base.json`, corrige lo que puedas, vuelve a escanear contra la instantánea y la herramienta clasifica cada hallazgo como **nuevo** (la superficie creció) o **resuelto** (el arreglo funcionó), con clave fuente+objetivo para que un reordenado o un cambio de redacción nunca finja un cambio. El diff trae la trayectoria del score de endurecimiento (`score 60 → 85`; los baselines anteriores a la métrica muestran `baseline predates scoring` en vez de fingir una regresión) y aparece en el terminal, en el JSON (clave `"diff"` con `new`/`resolved`/`new_exploitable`/`score_after`/`summary_before`) y en una sección `## Diff vs baseline` del reporte markdown:
 
 ```bash
 $ autoprivilege --output base.json          # día 0: instantánea
@@ -186,9 +195,10 @@ $ autoprivilege --baseline base.json        # día N: verificar
   ── Diff vs baseline ─────────────────────
    new        1  (exploitable 1)
    resolved   3
+   score      60 → 85
 ```
 
-**Puerta de endurecimiento CI** (`--fail-on`) — convierte el escaneo en una comprobación de política: `--quiet --fail-on high` sale con código `3` cuando existe al menos un hallazgo explotable en o por encima del umbral, así un pipeline (o un cron que envía informes) falla ruidosamente en cuanto la superficie medida regresa.
+**Puerta de endurecimiento CI** (`--fail-on`) — convierte el escaneo en una comprobación de política: `--quiet --fail-on high` sale con código `3` cuando existe al menos un hallazgo explotable en o por encima del umbral, así un pipeline (o un cron que envía informes) falla ruidosamente en cuanto la superficie medida regresa. Combina los tres: `--parallel` para velocidad, `--sarif` para el dashboard, `--fail-on` para el veredicto.
 
 ## El laboratorio rootless
 
@@ -219,7 +229,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-82 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON), el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes), el diff contra baseline (clasificación nuevo/resuelto con clave fuente+objetivo, forma JSON sin `null`, validación fail-fast de JSON ajenos), la puerta `--fail-on` (parseo del umbral, recuento solo de explotables) y los scanners nuevos de preload/sudoers (recuento de entradas, honestidad escribible-vs-informativo, escritura sudoers idempotente con compensación de salto de línea). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
+109 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON), el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes), el diff contra baseline (clasificación nuevo/resuelto con clave fuente+objetivo, forma JSON sin `null`, validación fail-fast de JSON ajenos, render de la trayectoria del score), la puerta `--fail-on` (parseo del umbral, recuento solo de explotables), los scanners de preload/sudoers (recuento de entradas, honestidad escribible-vs-informativo, escritura sudoers idempotente con compensación de salto de línea, pase por fichero condicionado a directorio cerrado), el score de endurecimiento (pesos exactos de penalización, determinismo, clamping, integración en summary/diff), la exportación SARIF (dedup de reglas en orden de aparición, mapeo de niveles, ubicaciones solo para rutas, escrituras 0600), los scanners de grupo y hooks de login (honestidad escribible-vs-silencio, guard de forma incorrecta) y el motor `--parallel` (merge byte-idéntico con finalización fuera de orden, stealth fuerza secuencial). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` Y `-race` en cada push a `main`, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
 
 ## Licencia
 

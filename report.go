@@ -11,10 +11,12 @@ import (
 
 // jsonSummary is the at-a-glance counts block of the machine-readable report.
 // It lives under the "summary" key of the --json output — the shape both
-// READMEs document for `jq '.summary'`.
+// READMEs document for `jq '.summary'`. Score is the hardening posture
+// (0–100, see score.go) — always present so jq consumers can chart it.
 type jsonSummary struct {
 	Findings    int            `json:"findings"`
 	Exploitable int            `json:"exploitable"`
+	Score       int            `json:"score"`
 	Vectors     int            `json:"vectors"`
 	Auto        int            `json:"auto"`
 	Manual      int            `json:"manual"`
@@ -28,6 +30,7 @@ type jsonSummary struct {
 func buildSummary(p *AutoPrivilege) jsonSummary {
 	s := jsonSummary{
 		Findings: len(p.Findings),
+		Score:    hardeningScore(p.Findings),
 		Vectors:  len(p.Vectors),
 		Rooted:   p.Rooted || isRoot(),
 		Risks:    map[string]int{},
@@ -178,6 +181,7 @@ func markdownSummary(s jsonSummary) string {
 	out := "\n## Summary\n\n"
 	out += "| Metric | Value |\n|---|---|\n"
 	out += fmt.Sprintf("| Findings | %d (%d exploitable) |\n", s.Findings, s.Exploitable)
+	out += fmt.Sprintf("| Hardening score | %d/100 |\n", s.Score)
 	out += fmt.Sprintf("| Vectors | %d (%d auto · %d manual) |\n", s.Vectors, s.Auto, s.Manual)
 	out += fmt.Sprintf("| Risks | %s |\n", riskLine)
 	out += fmt.Sprintf("| Root obtained | %v |\n", s.Rooted)
@@ -196,6 +200,13 @@ func markdownDiff(d *ReportDiff) string {
 	out += "\n| Metric | Value |\n|---|---|\n"
 	out += fmt.Sprintf("| New findings | %d (%d exploitable) |\n", len(d.New), d.NewExploitable)
 	out += fmt.Sprintf("| Resolved findings | %d |\n", len(d.Resolved))
+	// Baselines predating the metric carry score 0 — "unknown" renders
+	// honestly instead of a fabricated 100→X regression.
+	if d.SummaryBefore.Score > 0 {
+		out += fmt.Sprintf("| Score | %d → %d/100 |\n", d.SummaryBefore.Score, d.ScoreAfter)
+	} else {
+		out += fmt.Sprintf("| Score | %d/100 (baseline predates scoring) |\n", d.ScoreAfter)
+	}
 	out += "\n### New findings\n\n"
 	if len(d.New) == 0 {
 		out += "No new findings — the measured surface did not grow since the baseline.\n"

