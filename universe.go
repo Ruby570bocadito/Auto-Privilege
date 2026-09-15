@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-const Version = "1.7.0"
+const Version = "1.8.0"
 
 type RiskLevel int
 
@@ -137,6 +137,16 @@ type Options struct {
 	// documentation mode like --list-gtfo, so scripts can discover what
 	// --vector accepts without parsing the usage text.
 	ListVectors bool
+	// MinScore is the --min-score posture gate: when > 0, exit 3 if the
+	// hardening score lands below it. 0 (the default) disables the gate —
+	// a gate configured to "0" means "no floor", which can never trip
+	// because the score is clamped at 0, so the zero value is both the
+	// disabled state and a harmless no-op.
+	MinScore int
+	// Completion is the --completion shell name (bash, zsh or fish): print
+	// a completion script covering every registered flag and exit — a
+	// documentation mode like --list-vectors.
+	Completion string
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the

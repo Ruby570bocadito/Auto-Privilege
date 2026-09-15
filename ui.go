@@ -64,6 +64,7 @@ func usage() {
     --list-gtfo               print the embedded GTFOBins database
     --explain src             hardening playbook for a finding source (or all)
     --list-vectors            print the supported vector catalog
+    --completion shell        print a shell completion script: bash, zsh or fish
     --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
   Targeting:
@@ -98,6 +99,8 @@ func usage() {
     --fail-on-new [risk]      exit 3 when NEW exploitable findings appear vs
                               --baseline — regression gate (requires it);
                               optional threshold: --fail-on-new=low|medium|high|danger
+    --min-score n             exit 3 when the hardening score lands below the
+                              floor (1-100) — posture gate; 0 disables it
     --rooteame path           load .ko module if root is obtained (lab only)
     --version                 print version
     -h, --help                this help
@@ -119,6 +122,8 @@ func usage() {
     autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high
     autoprivilege --baseline base.json --fail-on-new   CI: fail only on regressions
     autoprivilege --baseline base.json --fail-on-new=high   only HIGH+ regressions
+    autoprivilege --quiet --min-score 70    gate: exit 3 while score < 70
+    autoprivilege --completion bash >> ~/.bashrc   shell completion
     lab/rootless_lab.sh --exploit          safe rootless demo lab
 `
 	fmt.Fprintln(os.Stderr, colorize(out, AnsiGrey))

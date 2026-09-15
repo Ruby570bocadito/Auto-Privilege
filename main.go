@@ -212,7 +212,11 @@ func (f failOnNewFlag) Set(s string) error {
 // The policy gate takes message precedence over the regression gate when
 // both trip — both exit 3 anyway. The regression gate honors the optional
 // --fail-on-new=<risk> threshold: only new exploitable findings at/above it
-// count (bare = any new exploitable, the round-11 behavior).
+// count (bare = any new exploitable, the round-11 behavior). The posture
+// gate (--min-score) is evaluated LAST: it trips when the hardening score
+// lands below the floor, with the lowest message precedence of the three
+// gates — a risk/regression verdict names its finding, which beats a
+// generic "score too low" for the operator reading the CI log.
 func computeExitCode(p *AutoPrivilege) (int, string) {
 	code := 0
 	if p.Opts.Exploit && !p.Opts.DryRun && !p.Rooted && !isRoot() {
@@ -241,6 +245,12 @@ func computeExitCode(p *AutoPrivilege) (int, string) {
 			}
 			return 3, fmt.Sprintf("  [!] regression gate: %d new exploitable finding(s)%s since baseline — exit 3\n",
 				n, thr)
+		}
+	}
+	if p.Opts.MinScore > 0 {
+		if score := hardeningScore(p.Findings); score < p.Opts.MinScore {
+			return 3, fmt.Sprintf("  [!] score gate: hardening score %d < %d — exit 3\n",
+				score, p.Opts.MinScore)
 		}
 	}
 	return code, ""
@@ -288,6 +298,8 @@ func registerFlags(fs *flag.FlagSet, opts *Options, risk *string, showVersion *b
 	fs.StringVar(&opts.Ignore, "ignore", "", "Comma-separated finding sources to exclude entirely: e.g. CRED,CONTAINER")
 	fs.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
 	fs.BoolVar(showVersion, "version", false, "Print version and exit")
+	fs.StringVar(&opts.Completion, "completion", "", "Print a shell completion script and exit: bash, zsh or fish")
+	fs.IntVar(&opts.MinScore, "min-score", 0, "Exit 3 when the hardening score lands below this floor (1-100); 0 disables the gate")
 }
 
 func run() *AutoPrivilege {
@@ -367,6 +379,17 @@ func run() *AutoPrivilege {
 		os.Exit(0)
 	}
 
+	// Shell completion is a documentation mode too: print the script
+	// for the requested shell and exit. Unknown shells fail fast
+	// (exit 2) — dumping bash syntax into a fish config helps nobody.
+	if opts.Completion != "" {
+		if err := printCompletion(opts.Completion); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
 	// The hardening playbook is a documentation mode: print and exit
 	// without scanning — same fail-fast contract as --list-gtfo.
 	if opts.Explain != "" {
@@ -382,6 +405,14 @@ func run() *AutoPrivilege {
 		os.Exit(2)
 	}
 	opts.MaxRisk = parseMaxRisk(risk)
+
+	// The posture gate validates its floor up front — same fail-fast
+	// contract as --fail-on: a CI gate must never scan for minutes
+	// before discovering its configuration was wrong.
+	if opts.MinScore < 0 || opts.MinScore > 100 {
+		fmt.Fprintf(os.Stderr, "  [-] invalid --min-score %d (must be 0-100; 0 disables the gate)\n", opts.MinScore)
+		os.Exit(2)
+	}
 
 	if opts.ScanTimeout <= 0 {
 		fmt.Fprintf(os.Stderr, "  [-] invalid --scan-timeout %q (must be a positive duration, e.g. 10s)\n", opts.ScanTimeout)
