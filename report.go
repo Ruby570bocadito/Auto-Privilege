@@ -66,8 +66,43 @@ type jsonReport struct {
 	Rooted     bool        `json:"rooted"`
 	Summary    jsonSummary `json:"summary"`
 	Diff       *ReportDiff `json:"diff,omitempty"`
-	Findings   []Finding   `json:"findings"`
-	Vectors    []Vector    `json:"vectors"`
+	// Plan is filled only on --dry-run runs: the structured execution plan
+	// (what --exploit WOULD run, safest first, with the within-risk verdict).
+	// Omitted otherwise -- a non-dry run reports what DID happen.
+	Plan     []planEntry `json:"plan,omitempty"`
+	Findings []Finding   `json:"findings"`
+	Vectors  []Vector    `json:"vectors"`
+}
+
+// planEntry is one row of the --dry-run --json plan: the same execution
+// plan the terminal shows (safest first), structured so CI can preview what
+// an --exploit run WOULD do without running it. Kind is auto|manual;
+// WithinRisk mirrors the [skip] verdict of the terminal plan.
+type planEntry struct {
+	Name       string `json:"name"`
+	Risk       string `json:"risk"`
+	Target     string `json:"target"`
+	Command    string `json:"command"`
+	Kind       string `json:"kind"`
+	WithinRisk bool   `json:"within_risk"`
+}
+
+// buildPlan renders the execution plan (pure -- the JSON printer and the
+// terminal printer share the sortedVectors order, so the two voices can
+// never disagree about what would run).
+func buildPlan(p *AutoPrivilege) []planEntry {
+	out := []planEntry{}
+	for _, v := range sortedVectors(p.Vectors) {
+		kind := "auto"
+		if v.Exploit == nil {
+			kind = "manual"
+		}
+		out = append(out, planEntry{
+			Name: v.Name, Risk: v.Risk.String(), Target: v.Target,
+			Command: v.Command, Kind: kind, WithinRisk: v.Risk <= p.Opts.MaxRisk,
+		})
+	}
+	return out
 }
 
 func buildReport(p *AutoPrivilege) jsonReport {
@@ -89,9 +124,19 @@ func buildReport(p *AutoPrivilege) jsonReport {
 		Rooted:     p.Rooted || isRoot(),
 		Summary:    buildSummary(p),
 		Diff:       p.Diff,
+		Plan:       planOrNil(p),
 		Findings:   findings,
 		Vectors:    vectors,
 	}
+}
+
+// planOrNil keeps the plan key out of the JSON unless --dry-run asked for
+// it -- a non-dry run reports what DID happen, not what would have.
+func planOrNil(p *AutoPrivilege) []planEntry {
+	if !p.Opts.DryRun {
+		return nil
+	}
+	return buildPlan(p)
 }
 
 // ExportJSON prints the enriched machine-readable report to stdout.

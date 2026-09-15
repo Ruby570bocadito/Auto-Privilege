@@ -158,12 +158,30 @@ type Options struct {
 	// reality contract --ignore established.
 	MinRisk      string
 	MinRiskLevel RiskLevel
+	// TopN is the --top value: how many "Top vectors" to print after a
+	// failed exploit run (the historical default is 5). The flag validates
+	// 1-50 fail-fast; direct constructions with a non-positive value fall
+	// back to the default through topVectorsN().
+	TopN int
 	// ForceColor (--color) keeps ANSI colors on even when stdout is not a
 	// terminal — the capture/demo escape hatch: pipes into ansi2html,
 	// silicon or a recorder keep the exact terminal look. --no-color wins
 	// over --color when both are given; NO_COLOR is respected only when
 	// neither flag is present.
 	ForceColor bool
+}
+
+// defaultTopVectors is the historical size of the end-of-run "Top vectors"
+// list — kept as a named constant so the test can pin the default.
+const defaultTopVectors = 5
+
+// topVectorsN resolves the effective --top value: the flag when sane, the
+// historical default otherwise (direct constructions, tests, library use).
+func (o Options) topVectorsN() int {
+	if o.TopN >= 1 && o.TopN <= 50 {
+		return o.TopN
+	}
+	return defaultTopVectors
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the

@@ -161,6 +161,15 @@ var explainDB = map[string]explainEntry{
 			"Audit /etc/profile.d for scripts you cannot attribute; delete orphans after inspection",
 		},
 	},
+	"POLKIT": {
+		What: "polkit policy surfaces are writable: a rule granting this user org.freedesktop.policykit.exec turns every pkexec into a passwordless root shell.",
+		Harden: []string{
+			"Restore: chown root:root /etc/polkit-1/rules.d && chmod 755 /etc/polkit-1/rules.d (rule files 644)",
+			"Review every .rules file line by line before cleaning — a legit accessibility rule can hide next to a grant",
+			"Audit who can write localauthority dirs: chown root:root && chmod 755 /etc/polkit-1/localauthority/*",
+			"Monitor polkitd logs after cleanup — reloads of rules you did not make are incident signals",
+		},
+	},
 }
 
 // validSources is the canonical list of finding sources the tool emits —
@@ -168,7 +177,7 @@ var explainDB = map[string]explainEntry{
 var validSources = []string{
 	"SUID", "SGID", "SUDO", "CRON", "FILE", "DOCKER", "CONTAINER", "CAPS",
 	"NFS", "PATH", "SERVICE", "KERNEL", "CRED", "PRELOAD", "SUDOERS",
-	"GROUP", "HOOKS",
+	"GROUP", "HOOKS", "POLKIT",
 }
 
 func isValidSource(s string) bool {

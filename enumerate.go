@@ -17,7 +17,7 @@ var validVectors = map[string]bool{
 	"suid": true, "sgid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
 	"docker": true, "container": true, "caps": true, "nfs": true, "path": true, "service": true,
 	"kernel": true, "cred": true, "preload": true, "sudoers": true,
-	"group": true, "hooks": true,
+	"group": true, "hooks": true, "polkit": true,
 }
 
 // vectorCatalog documents what each --vector name actually inspects. It is
@@ -48,6 +48,7 @@ var vectorCatalog = map[string]vectorDoc{
 	"sudoers":   {Desc: "writable sudoers file, sudoers.d directory or per-file drop-ins"},
 	"group":     {Desc: "writable /etc/group — add yourself to a privileged group"},
 	"hooks":     {Desc: "writable login hooks: /etc/environment, /etc/profile.d, /etc/profile, /etc/bash.bashrc"},
+	"polkit":    {Desc: "writable polkit policy surfaces: rules.d (.rules), rule files and localauthority dirs — pkexec without auth"},
 }
 
 // vectorCatalogOrder lists the catalog keys in the canonical order used by
@@ -56,7 +57,7 @@ var vectorCatalog = map[string]vectorDoc{
 var vectorCatalogOrder = []string{
 	"suid", "sgid", "sudo", "sudoers", "cron", "passwd", "shadow", "group",
 	"docker", "container", "caps", "nfs", "path", "service", "kernel",
-	"cred", "preload", "hooks",
+	"cred", "preload", "hooks", "polkit",
 }
 
 // parseVectorList splits and validates a comma-separated --vector argument.
@@ -147,6 +148,8 @@ func enumerateAll(p *AutoPrivilege) {
 			enumerateGroup(p, f)
 		case "HOOKS":
 			enumerateHooks(p, f)
+		case "POLKIT":
+			enumeratePolkit(p, f)
 		case "PATH":
 			enumeratePATH(p, f)
 		case "SERVICE":
@@ -240,6 +243,10 @@ func enumerateVectors(p *AutoPrivilege, names []string) {
 			case "hooks":
 				if f.Source == "HOOKS" {
 					enumerateHooks(p, f)
+				}
+			case "polkit":
+				if f.Source == "POLKIT" {
+					enumeratePolkit(p, f)
 				}
 			}
 		}

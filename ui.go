@@ -71,7 +71,7 @@ func usage() {
   Targeting:
     --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
                               docker,container,caps,nfs,path,service,kernel,cred,
-                              preload,sudoers,group,hooks,all
+                              preload,sudoers,group,hooks,polkit,all
     --risk level              max auto-exploit risk: safe|low|medium|high|danger
     --one-shot                stop after the first successful exploit
     --lhost ip                reverse-shell listener host (auto-detected)
@@ -98,6 +98,8 @@ func usage() {
                               everywhere (terminal, JSON, reports, gates)
     --parallel                run scanners concurrently (same results, faster)
     --stealth                 jitter between scanners and exploits
+    --top n                   show the top n vectors after a failed exploit
+                              run (default 5, max 50)
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
     --fail-on risk            exit 3 when exploitable findings >= risk
                               (low|medium|high|danger) — CI hardening gate

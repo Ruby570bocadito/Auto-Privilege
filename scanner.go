@@ -25,7 +25,7 @@ var scannerOrder = []func(*AutoPrivilege){
 	scanSetBits, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
 	scanContainers, scanCapabilities, scanFileCaps, scanNFS, scanWritablePath,
 	scanServices, scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
-	scanPreload, scanGroup, scanLoginHooks,
+	scanPreload, scanGroup, scanLoginHooks, scanPolkit,
 }
 
 func scanAll(p *AutoPrivilege) {

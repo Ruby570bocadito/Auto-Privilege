@@ -97,7 +97,7 @@ func main() {
 	// No root obtained: show the strongest manual options instead of nothing.
 	if !p.Rooted && !isRoot() && p.Opts.Exploit && !p.Opts.Quiet && !p.Opts.JSON {
 		fmt.Println(colorize("\n  [*] No root obtained. Top vectors:", AnsiYellow))
-		printTopVectors(p, 5)
+		printTopVectors(p, p.Opts.topVectorsN())
 	}
 
 	if p.Opts.Report != "" {
@@ -269,7 +269,7 @@ func computeExitCode(p *AutoPrivilege) (int, string) {
 func registerFlags(fs *flag.FlagSet, opts *Options, risk *string, showVersion *bool) {
 	fs.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
 	fs.StringVar(risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	fs.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers,group,hooks")
+	fs.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers,group,hooks,polkit")
 	fs.BoolVar(&opts.JSON, "json", false, "JSON output")
 	fs.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
 	fs.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
@@ -305,6 +305,7 @@ func registerFlags(fs *flag.FlagSet, opts *Options, risk *string, showVersion *b
 	fs.BoolVar(showVersion, "version", false, "Print version and exit")
 	fs.StringVar(&opts.Completion, "completion", "", "Print a shell completion script and exit: bash, zsh or fish")
 	fs.IntVar(&opts.MinScore, "min-score", 0, "Exit 3 when the hardening score lands below this floor (1-100); 0 disables the gate")
+	fs.IntVar(&opts.TopN, "top", defaultTopVectors, "Show the top N vectors after a failed exploit run (1-50)")
 	fs.BoolVar(&opts.ListSources, "list-sources", false, "Print the finding-source vocabulary (for --ignore/--explain) and exit")
 	fs.StringVar(&opts.MinRisk, "min-risk", "", "Hide findings below this risk floor: low, medium, high, danger")
 }
@@ -467,6 +468,16 @@ func run() *AutoPrivilege {
 	// before discovering its configuration was wrong.
 	if opts.MinScore < 0 || opts.MinScore > 100 {
 		fmt.Fprintf(os.Stderr, "  [-] invalid --min-score %d (must be 0-100; 0 disables the gate)\n", opts.MinScore)
+		os.Exit(2)
+	}
+
+	// --top bounds its window fail-fast — same contract as --min-score:
+	// a typo must exit 2, never silently reshape the end-of-run summary.
+	// (run() always sees the flag default or an explicit value, so a zero
+	// here IS an explicit --top 0 — direct Options constructions never pass
+	// through run() and fall back to the default via topVectorsN().)
+	if opts.TopN < 1 || opts.TopN > 50 {
+		fmt.Fprintf(os.Stderr, "  [-] invalid --top %d (must be 1-50)\n", opts.TopN)
 		os.Exit(2)
 	}
 

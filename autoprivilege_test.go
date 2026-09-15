@@ -1206,6 +1206,7 @@ func TestVectorSelectionSymmetry(t *testing.T) {
 		{Source: "SUDOERS", Target: "/etc/sudoers", Exploitable: true},
 		{Source: "GROUP", Target: "/etc/group", Exploitable: true},
 		{Source: "HOOKS", Target: "/etc/environment", Exploitable: true},
+		{Source: "POLKIT", Target: "/etc/polkit-1/rules.d", Exploitable: true},
 	}
 
 	total := 0
