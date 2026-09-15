@@ -59,14 +59,20 @@ func completionFlagNames() [][2]string {
 // flag. Everything is sourced from the binary's own tables (no hardcoded
 // drift): vector names from vectorCatalogOrder, sources from validSources,
 // shells and risk levels from the same literals run() validates against.
+// Round 15: --min-risk completes the risk floor (the exact list
+// parseMinRisk accepts) and --ignore completes the source vocabulary (the
+// exact list parseIgnore validates against) — tab-completing a CI gate or
+// an exclusion list no longer requires remembering the vocabulary.
 var completionValues = map[string][]string{
 	"risk":        {"safe", "low", "medium", "high", "danger"},
 	"fail-on":     {"low", "medium", "high", "danger"},
 	"fail-on-new": {"low", "medium", "high", "danger"},
+	"min-risk":    {"low", "medium", "high", "danger"},
 	"log":         {"text", "json"},
 	"completion":  {"bash", "zsh", "fish"},
 	"vector":      append(append([]string{}, vectorCatalogOrder...), "all"),
 	"explain":     append([]string{"all"}, validSources...),
+	"ignore":      append([]string{}, validSources...),
 }
 
 // completionScriptFor renders the full completion script for one shell.

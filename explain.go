@@ -298,3 +298,45 @@ func filterIgnored(findings []Finding, ignored []string) []Finding {
 	}
 	return out
 }
+
+// parseMinRisk validates the --min-risk value: the risk floor below which
+// findings stop existing for the rest of the run. "safe" is rejected on
+// purpose — a safe floor would show everything (the default), so accepting
+// it would only give operators a flag that silently does nothing. Same
+// fail-fast contract as parseFailOn: a typo costs an exit 2 before the
+// scan, never a wasted run that hides nothing.
+func parseMinRisk(s string) (RiskLevel, error) {
+	switch strings.ToLower(s) {
+	case "low":
+		return RiskLow, nil
+	case "medium":
+		return RiskMedium, nil
+	case "high":
+		return RiskHigh, nil
+	case "danger":
+		return RiskDanger, nil
+	case "safe":
+		return RiskSafe, errors.New(`invalid --min-risk "safe": the default already shows every finding — use low as the floor`)
+	}
+	return RiskSafe, fmt.Errorf("invalid --min-risk %q (valid: low, medium, high, danger)", s)
+}
+
+// filterMinRisk drops findings strictly BELOW the risk floor (the floor is
+// inclusive: --min-risk medium keeps MEDIUM and above). It runs ONCE, right
+// after filterIgnored, under the same filtered-reality contract: every
+// downstream consumer — terminal, JSON, markdown, SARIF, hardening score,
+// all three CI gates, baseline diff, enumeration — sees the identical
+// filtered set. Order-preserving and empty-safe: the survivors keep the
+// scannerOrder sequence the parallel merge guarantees.
+func filterMinRisk(findings []Finding, floor RiskLevel) []Finding {
+	if floor <= RiskSafe {
+		return findings
+	}
+	out := findings[:0:0]
+	for _, f := range findings {
+		if f.Risk >= floor {
+			out = append(out, f)
+		}
+	}
+	return out
+}

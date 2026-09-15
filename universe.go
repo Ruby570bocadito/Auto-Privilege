@@ -147,6 +147,23 @@ type Options struct {
 	// a completion script covering every registered flag and exit — a
 	// documentation mode like --list-vectors.
 	Completion string
+	// ListSources prints the finding-source vocabulary (what --ignore and
+	// --explain accept) and exits — a documentation mode like
+	// --list-vectors. JSON emits the same list machine-readable.
+	ListSources bool
+	// MinRisk holds the raw --min-risk value; MinRiskLevel its parsed form
+	// (filled by run(), fail-fast on invalid values; empty string leaves
+	// MinRiskLevel at RiskSafe = the floor is disabled). Findings below
+	// the floor are dropped ONCE right after the scan — the same filtered
+	// reality contract --ignore established.
+	MinRisk      string
+	MinRiskLevel RiskLevel
+	// ForceColor (--color) keeps ANSI colors on even when stdout is not a
+	// terminal — the capture/demo escape hatch: pipes into ansi2html,
+	// silicon or a recorder keep the exact terminal look. --no-color wins
+	// over --color when both are given; NO_COLOR is respected only when
+	// neither flag is present.
+	ForceColor bool
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the
@@ -190,9 +207,23 @@ const (
 
 // colorsEnabled is toggled once at startup: colors auto-disable when stdout
 // is not a terminal, when --no-color is passed, or when NO_COLOR is set.
+// --color forces them back on for captures and demos.
 var colorsEnabled = true
 
 func setColorMode(enabled bool) { colorsEnabled = enabled }
+
+// resolveColorMode distills the color decision into a pure function:
+// --no-color wins over --color, --color beats the TTY check and NO_COLOR,
+// and with neither flag the classic rule applies (TTY and no NO_COLOR).
+func resolveColorMode(force, noColor, tty bool, noColorEnv string) bool {
+	if noColor {
+		return false
+	}
+	if force {
+		return true
+	}
+	return tty && noColorEnv == ""
+}
 
 // isTerminal reports whether f is a real terminal (TTY). A plain char-device
 // check is not enough — /dev/null also matches — so we ask the kernel with

@@ -19,11 +19,15 @@ func main() {
 	}
 	scanAll(p)
 
-	// --ignore applies ONCE, right after the scan: every downstream
-	// consumer (terminal, JSON, markdown, SARIF, score, policy gate,
-	// baseline diff, enumeration) sees the same filtered reality.
+	// --ignore and --min-risk apply ONCE, right after the scan: every
+	// downstream consumer (terminal, JSON, markdown, SARIF, score,
+	// policy gate, baseline diff, enumeration) sees the same filtered
+	// reality. The source exclusion runs first, then the risk floor.
 	if len(p.Opts.IgnoreSources) > 0 {
 		p.Findings = filterIgnored(p.Findings, p.Opts.IgnoreSources)
+	}
+	if p.Opts.MinRiskLevel > RiskSafe {
+		p.Findings = filterMinRisk(p.Findings, p.Opts.MinRiskLevel)
 	}
 
 	// FASE 2: Enumerate
@@ -277,6 +281,7 @@ func registerFlags(fs *flag.FlagSet, opts *Options, risk *string, showVersion *b
 	fs.StringVar(&opts.LogFormat, "log", "text", "Log format: text, json")
 	fs.BoolVar(&opts.UpdateGTFO, "update-gtfobins", false, "Update and persist the GTFOBins database")
 	fs.BoolVar(&opts.NoColor, "no-color", false, "Disable ANSI colors (auto-off when piped)")
+	fs.BoolVar(&opts.ForceColor, "color", false, "Force ANSI colors even when piped (for captures and demos)")
 	fs.BoolVar(&opts.Verbose, "verbose", false, "Verbose logging on stderr")
 	fs.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
 	fs.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
@@ -300,6 +305,8 @@ func registerFlags(fs *flag.FlagSet, opts *Options, risk *string, showVersion *b
 	fs.BoolVar(showVersion, "version", false, "Print version and exit")
 	fs.StringVar(&opts.Completion, "completion", "", "Print a shell completion script and exit: bash, zsh or fish")
 	fs.IntVar(&opts.MinScore, "min-score", 0, "Exit 3 when the hardening score lands below this floor (1-100); 0 disables the gate")
+	fs.BoolVar(&opts.ListSources, "list-sources", false, "Print the finding-source vocabulary (for --ignore/--explain) and exit")
+	fs.StringVar(&opts.MinRisk, "min-risk", "", "Hide findings below this risk floor: low, medium, high, danger")
 }
 
 func run() *AutoPrivilege {
@@ -353,6 +360,16 @@ func run() *AutoPrivilege {
 		}
 		opts.IgnoreSources = names
 	}
+	// The risk floor validates fail-fast — same contract as --fail-on:
+	// a typo must cost an exit 2, never a full scan that hides nothing.
+	if opts.MinRisk != "" {
+		lvl, err := parseMinRisk(opts.MinRisk)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
+		opts.MinRiskLevel = lvl
+	}
 	if opts.SarifStdout && opts.JSON {
 		fmt.Fprintln(os.Stderr, "  [-] --sarif-stdout and --json both write a document to stdout — pick one")
 		os.Exit(2)
@@ -372,8 +389,9 @@ func run() *AutoPrivilege {
 		}
 	}
 
-	// Colors: auto-disable when piped, when told to, or when NO_COLOR is set.
-	setColorMode(isTerminal(os.Stdout) && !opts.NoColor && os.Getenv("NO_COLOR") == "")
+	// Colors: --no-color wins, then --color, then the classic rule
+	// (TTY && !NO_COLOR). Three-way precedence pinned by test.
+	setColorMode(resolveColorMode(opts.ForceColor, opts.NoColor, isTerminal(os.Stdout), os.Getenv("NO_COLOR")))
 
 	if showVersion {
 		fmt.Printf("Auto-Privilege v%s (%s/%s)\n", Version, runtime.GOOS, runtime.GOARCH)
@@ -388,8 +406,25 @@ func run() *AutoPrivilege {
 	// The vector catalog is a documentation mode like --list-gtfo:
 	// print what --vector accepts (with what each vector actually
 	// scans) and exit without scanning — same fail-fast contract.
+	// --json switches the voice: same catalog, machine-readable.
 	if opts.ListVectors {
-		printVectorList()
+		if opts.JSON {
+			printVectorListJSON()
+		} else {
+			printVectorList()
+		}
+		os.Exit(0)
+	}
+
+	// The finding-source vocabulary is a documentation mode too: what
+	// --ignore and --explain accept, discoverable without provoking a
+	// validation error. --json emits the same list machine-readable.
+	if opts.ListSources {
+		if opts.JSON {
+			printSourceListJSON()
+		} else {
+			printSourceList()
+		}
 		os.Exit(0)
 	}
 
@@ -406,8 +441,15 @@ func run() *AutoPrivilege {
 
 	// The hardening playbook is a documentation mode: print and exit
 	// without scanning — same fail-fast contract as --list-gtfo.
+	// --json switches the voice: the same playbook, structured.
 	if opts.Explain != "" {
-		if err := printExplain(opts.Explain); err != nil {
+		var err error
+		if opts.JSON {
+			err = printExplainJSON(opts.Explain)
+		} else {
+			err = printExplain(opts.Explain)
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
 			os.Exit(2)
 		}

@@ -64,6 +64,7 @@ func usage() {
     --list-gtfo               print the embedded GTFOBins database
     --explain src             hardening playbook for a finding source (or all)
     --list-vectors            print the supported vector catalog
+    --list-sources            print the finding-source vocabulary (--ignore/--explain)
     --completion shell        print a shell completion script: bash, zsh or fish
     --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
@@ -86,11 +87,15 @@ func usage() {
     --baseline file           diff findings against a previous --json/--output report
     --quiet                   no output; exit code 0 = root, 1 = no root
     --no-color                disable ANSI colors (auto-off when piped)
+    --color                   force ANSI colors even when piped (captures, demos)
     --verbose                 debug logging on stderr
     --log fmt                 log format: text|json (stderr)
 
   Misc:
     --ignore list             exclude finding sources entirely: e.g. CRED,CONTAINER
+    --min-risk level          hide findings below this risk floor:
+                              low|medium|high|danger — the floor applies
+                              everywhere (terminal, JSON, reports, gates)
     --parallel                run scanners concurrently (same results, faster)
     --stealth                 jitter between scanners and exploits
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
@@ -117,6 +122,10 @@ func usage() {
     autoprivilege --quiet --sarif-stdout | sarif-viewer   pipe the log
     autoprivilege --explain cron           how to close the CRON findings
     autoprivilege --ignore CRED,CONTAINER  CI scan without the noisy sources
+    autoprivilege --min-risk medium       same scan, only MEDIUM+ findings
+    autoprivilege --list-sources          what --ignore/--explain accept
+    autoprivilege --list-vectors --json   vector catalog, machine-readable
+    autoprivilege --explain cron --json   hardening playbook, structured
     autoprivilege --output base.json       snapshot, then harden, then:
     autoprivilege --baseline base.json     show new/resolved findings
     autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high
