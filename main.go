@@ -18,6 +18,13 @@ func main() {
 	}
 	scanAll(p)
 
+	// --ignore applies ONCE, right after the scan: every downstream
+	// consumer (terminal, JSON, markdown, SARIF, score, policy gate,
+	// baseline diff, enumeration) sees the same filtered reality.
+	if len(p.Opts.IgnoreSources) > 0 {
+		p.Findings = filterIgnored(p.Findings, p.Opts.IgnoreSources)
+	}
+
 	// FASE 2: Enumerate
 	if !p.Opts.Quiet && !p.Opts.JSON {
 		fmt.Println(colorize("\n  [2/3] Enumerating vectors...", AnsiCyan))
@@ -118,6 +125,15 @@ func main() {
 		}
 	}
 
+	// --sarif-stdout hands the log to the pipeline directly — printed
+	// even in --quiet (the operator explicitly asked for stdout output,
+	// same contract as --json).
+	if p.Opts.SarifStdout {
+		if err := p.ExportSARIF(); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] sarif export failed: %v\n", err)
+		}
+	}
+
 	// Elapsed is measured HERE, not right after run(): the old code
 	// captured it before the scan even started, so the printed summary
 	// always showed ~0s on a scan that really took seconds (the JSON was
@@ -175,7 +191,10 @@ func run() *AutoPrivilege {
 	flag.StringVar(&opts.Baseline, "baseline", "", "Diff findings against a previous --json/--output report")
 	flag.StringVar(&opts.FailOn, "fail-on", "", "Exit 3 if any exploitable finding at/above this risk: low, medium, high, danger")
 	flag.StringVar(&opts.Sarif, "sarif", "", "Write a SARIF 2.1.0 report for code-scanning dashboards (GitHub/GitLab)")
+	flag.BoolVar(&opts.SarifStdout, "sarif-stdout", false, "Print the SARIF report to stdout (exclusive with --json)")
 	flag.BoolVar(&opts.Parallel, "parallel", false, "Run scanners concurrently (results identical to sequential)")
+	flag.StringVar(&opts.Explain, "explain", "", "Print the hardening playbook for a source (or all) and exit: e.g. cron")
+	flag.StringVar(&opts.Ignore, "ignore", "", "Comma-separated finding sources to exclude entirely: e.g. CRED,CONTAINER")
 	flag.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
@@ -210,6 +229,18 @@ func run() *AutoPrivilege {
 		}
 		baseline = b
 	}
+	if opts.Ignore != "" {
+		names, err := parseIgnore(opts.Ignore)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
+		opts.IgnoreSources = names
+	}
+	if opts.SarifStdout && opts.JSON {
+		fmt.Fprintln(os.Stderr, "  [-] --sarif-stdout and --json both write a document to stdout — pick one")
+		os.Exit(2)
+	}
 
 	// Colors: auto-disable when piped, when told to, or when NO_COLOR is set.
 	setColorMode(isTerminal(os.Stdout) && !opts.NoColor && os.Getenv("NO_COLOR") == "")
@@ -221,6 +252,16 @@ func run() *AutoPrivilege {
 
 	if opts.ListGTFO {
 		printGTFOList()
+		os.Exit(0)
+	}
+
+	// The hardening playbook is a documentation mode: print and exit
+	// without scanning — same fail-fast contract as --list-gtfo.
+	if opts.Explain != "" {
+		if err := printExplain(opts.Explain); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
 		os.Exit(0)
 	}
 

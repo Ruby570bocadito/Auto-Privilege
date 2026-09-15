@@ -109,10 +109,20 @@ type Options struct {
 	FailOnEnabled bool
 	// Sarif is the --sarif output path (empty = no SARIF export).
 	Sarif string
+	// SarifStdout prints the SARIF log to stdout instead of a file
+	// (mutually exclusive with --json, enforced fail-fast in run()).
+	SarifStdout bool
 	// Parallel runs the scanners concurrently; the merged findings keep
 	// the exact scannerOrder sequence, so results are byte-identical to a
 	// sequential run (tested). Stealth forces sequential regardless.
 	Parallel bool
+	// Explain prints the hardening playbook (a source name or "all") and
+	// exits — no scan is performed.
+	Explain string
+	// Ignore holds the raw --ignore value; IgnoreSources its parsed form
+	// (filled by run(), fail-fast on unknown names).
+	Ignore        string
+	IgnoreSources []string
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the

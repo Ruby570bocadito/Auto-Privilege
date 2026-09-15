@@ -142,6 +142,10 @@ func (p *AutoPrivilege) WriteMarkdownReport(path string) error {
 	if len(rep.Findings) == 0 {
 		out += "| — | — | — | no findings |\n"
 	}
+	// The remediation playbook embedded in the evidence report: one
+	// section per detected source (same knowledge --explain serves).
+	// Empty-safe: no findings → no section.
+	out += hardeningPlan(rep.Findings)
 
 	out += "\n## Exploit vectors\n\n"
 	for _, v := range rep.Vectors {

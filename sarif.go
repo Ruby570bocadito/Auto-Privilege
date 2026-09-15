@@ -206,3 +206,15 @@ func (p *AutoPrivilege) WriteSARIFFile(path string) error {
 	}
 	return os.WriteFile(path, data, 0600)
 }
+
+// ExportSARIF prints the SARIF log to stdout for pipelines that consume it
+// directly (--sarif-stdout). Exclusive with --json, enforced fail-fast in
+// run(): two documents on one stdout is a contract neither can honor.
+func (p *AutoPrivilege) ExportSARIF() error {
+	data, err := marshalJSON(buildSARIF(p.Findings))
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(data))
+	return nil
+}

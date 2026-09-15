@@ -911,28 +911,48 @@ func isWritableByCurrentUser(path string) bool {
 }
 
 // --- Writable services ---
+// servicePaths exists so tests can point the scanner at synthetic trees;
+// production code always sees the real /etc locations.
+var servicePaths = struct {
+	systemd string
+	initd   string
+}{
+	systemd: "/etc/systemd/system",
+	initd:   "/etc/init.d",
+}
+
+// scanServices covers the two service-execution families the current user
+// must never be able to rewrite: systemd units (systemd) and SysV init
+// scripts (init.d). Both run as root — at boot, on restart, on timer fire.
 func scanServices(p *AutoPrivilege) {
-	dirs := []string{
-		"/etc/systemd/system",
+	scanServicesWithPaths(p, servicePaths.systemd, servicePaths.initd)
+}
+
+func scanServicesWithPaths(p *AutoPrivilege, systemdDir, initdDir string) {
+	dirs := []struct {
+		path   string
+		suffix string // "" matches every regular file (init.d scripts carry no extension)
+		desc   string
+	}{
+		{systemdDir, ".service", "Writable systemd service — hijack execution"},
+		{initdDir, "", "Writable init.d script — hijack boot/service execution"},
 	}
 	for _, dir := range dirs {
-		entries, err := os.ReadDir(dir)
+		entries, err := os.ReadDir(dir.path)
 		if err != nil {
 			continue
 		}
 		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".service") {
+			if dir.suffix != "" && !strings.HasSuffix(e.Name(), dir.suffix) {
 				continue
 			}
-			full := filepath.Join(dir, e.Name())
+			full := filepath.Join(dir.path, e.Name())
 			info, _ := os.Lstat(full)
-			if info == nil {
+			if info == nil || !info.Mode().IsRegular() {
 				continue
 			}
 			if isWritableByCurrentUser(full) {
-				addFinding(p, "SERVICE", full,
-					"Writable systemd service — hijack execution",
-					RiskHigh, true)
+				addFinding(p, "SERVICE", full, dir.desc, RiskHigh, true)
 			}
 		}
 	}
@@ -1125,15 +1145,21 @@ func sudoVersionOlder(ver, ref string) bool {
 
 // --- Preload + sudoers (persistence-critical configs) ---
 // preloadPaths exists so tests can point the scanner at synthetic files;
-// production code always sees the real /etc locations.
+// production code always sees the real /etc locations. confD/conf are the
+// dynamic-loader SEARCH path (a different mechanism than ld.so.preload but
+// the same family: library loading under root privilege).
 var preloadPaths = struct {
 	preload    string
 	sudoers    string
 	sudoersDir string
+	conf       string
+	confD      string
 }{
 	preload:    "/etc/ld.so.preload",
 	sudoers:    "/etc/sudoers",
 	sudoersDir: "/etc/sudoers.d",
+	conf:       "/etc/ld.so.conf",
+	confD:      "/etc/ld.so.conf.d",
 }
 
 // scanPreload checks the two config surfaces whose compromise equals root:
@@ -1144,6 +1170,26 @@ var preloadPaths = struct {
 // mirroring the credential scanners' "presence, not contents" rule.
 func scanPreload(p *AutoPrivilege) {
 	scanPreloadPaths(p, preloadPaths.preload, preloadPaths.sudoers, preloadPaths.sudoersDir)
+	scanLoaderPath(p, preloadPaths.conf, preloadPaths.confD)
+}
+
+// scanLoaderPath flags a writable ld.so.conf or ld.so.conf.d: entries there
+// add library search paths absorbed by the system's next ldconfig run
+// (package installs, boot), and SUID binaries resolve through that cache —
+// a planted directory with a trojan .so becomes a root-loaded object. Same
+// HIGH/exploitable class as a writable cron file: user action now, system
+// trigger later, root on arrival.
+func scanLoaderPath(p *AutoPrivilege, confPath, confDir string) {
+	if info, err := os.Lstat(confPath); err == nil && info.Mode().IsRegular() && isWritableByCurrentUser(confPath) {
+		addFinding(p, "PRELOAD", confPath,
+			"Writable /etc/ld.so.conf — inject library search paths into the system loader cache",
+			RiskHigh, true)
+	}
+	if info, err := os.Lstat(confDir); err == nil && info.IsDir() && isWritableByCurrentUser(confDir) {
+		addFinding(p, "PRELOAD", confDir,
+			"Writable /etc/ld.so.conf.d — drop a .conf adding an attacker library dir (absorbed by the next ldconfig)",
+			RiskHigh, true)
+	}
 }
 
 func scanPreloadPaths(p *AutoPrivilege, preloadPath, sudoersPath, sudoersDir string) {

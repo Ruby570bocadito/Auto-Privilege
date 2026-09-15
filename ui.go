@@ -62,6 +62,7 @@ func usage() {
     --exploit                 auto-exploit found vectors, safest first
     --dry-run                 scan + enumerate, show what would run
     --list-gtfo               print the embedded GTFOBins database
+    --explain src             hardening playbook for a finding source (or all)
     --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
   Targeting:
@@ -78,6 +79,7 @@ func usage() {
     --output file             write the JSON report to a file (0600)
     --report file             also write a markdown evidence report
     --sarif file              SARIF 2.1.0 report for code-scanning dashboards
+    --sarif-stdout            print the SARIF log to stdout (not with --json)
     --baseline file           diff findings against a previous --json/--output report
     --quiet                   no output; exit code 0 = root, 1 = no root
     --no-color                disable ANSI colors (auto-off when piped)
@@ -85,6 +87,7 @@ func usage() {
     --log fmt                 log format: text|json (stderr)
 
   Misc:
+    --ignore list             exclude finding sources entirely: e.g. CRED,CONTAINER
     --parallel                run scanners concurrently (same results, faster)
     --stealth                 jitter between scanners and exploits
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
@@ -102,6 +105,9 @@ func usage() {
     autoprivilege --json > report.json     CI-friendly output
     autoprivilege --report audit.md        markdown evidence report
     autoprivilege --sarif audit.sarif      GitHub code-scanning upload
+    autoprivilege --quiet --sarif-stdout | sarif-viewer   pipe the log
+    autoprivilege --explain cron           how to close the CRON findings
+    autoprivilege --ignore CRED,CONTAINER  CI scan without the noisy sources
     autoprivilege --output base.json       snapshot, then harden, then:
     autoprivilege --baseline base.json     show new/resolved findings
     autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high

@@ -28,9 +28,11 @@ Everything is deliberate about its honesty. Vectors it cannot verify automatical
 
 | | |
 |---|---|
-| **20 read-only scanners** | SUID/SGID, sudo rules + version, writable cron (+ wildcard-injection candidates), passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS (no_root_squash + hostless-rw exports), writable PATH dirs, systemd services, kernel CVEs, credentials in history/configs, cloud metadata, `ld.so.preload`, writable sudoers (file, dir and per-file drop-ins), writable `/etc/group`, writable login hooks (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`) |
+| **20 read-only scanners** | SUID/SGID, sudo rules + version, writable cron (+ wildcard-injection candidates), passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS (no_root_squash + hostless-rw exports), writable PATH dirs, systemd units AND init.d scripts, kernel CVEs, credentials in history/configs, cloud metadata, `ld.so.preload` + writable `ld.so.conf(.d)`, writable sudoers (file, dir and per-file drop-ins), writable `/etc/group`, writable login hooks (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`) |
 | **75 GTFOBins techniques + 31 sgid** | embedded in the binary — works air-gapped; refreshable from upstream with one command (`--list-gtfo` shows the sgid section) |
 | **Hardening score** | every scan ends with a deterministic 0–100 posture number — weighted by risk and exploitability — so `--baseline` diffs read `score 60 → 85` instead of raw counts |
+| **Hardening playbook** | `--explain cron` (or `all`) prints the exact remediation steps per finding source; `--report` embeds a `## Hardening plan` section built from the sources actually detected |
+| **Hardening playbook** | `--explain cron` (or `all`) prints the exact remediation steps per finding source; `--report` embeds a `## Hardening plan` section built from the sources actually detected |
 | **Safest-first auto-exploit** | techniques sorted by risk, `--risk` cap, `--one-shot` stop at first root |
 | **Four output formats** | human terminal with truecolor ramp, `--json` for machines (`--output file` persists it, 0600), markdown `--report` with evidence, and `--sarif` for GitHub/GitLab code-scanning dashboards |
 | **Rootless demo lab** | `lab/rootless_lab.sh` builds a fake-vulnerable box inside a user namespace — no Docker, no real root, nothing touches your system |
@@ -80,6 +82,7 @@ Modes:
   --exploit                 auto-exploit found vectors, safest first
   --dry-run                 scan + enumerate, show what would run
   --list-gtfo               print the embedded GTFOBins database
+  --explain src             hardening playbook for a finding source (or all)
   --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
 Targeting:
@@ -96,6 +99,7 @@ Output:
   --output file             write the JSON report to a file (0600)
   --report file             also write a markdown evidence report
   --sarif file              SARIF 2.1.0 report for code-scanning dashboards
+  --sarif-stdout            print the SARIF log to stdout (not with --json)
   --baseline file           diff findings against a previous --json/--output report
   --quiet                   no output; exit code 0 = root, 1 = no root
   --no-color                disable ANSI colors (auto-off when piped)
@@ -103,6 +107,7 @@ Output:
   --log fmt                 log format: text|json (stderr)
 
 Misc:
+  --ignore list             exclude finding sources entirely: e.g. CRED,CONTAINER
   --parallel                run scanners concurrently (same results, faster)
   --stealth                 jitter between scanners and exploits
   --scan-timeout dur        timeout for scan-time external commands (default 5s)
@@ -130,10 +135,10 @@ Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error · `3
 | `caps` | cap_setuid processes, file capabilities (`getcap -r /`) | yes |
 | `nfs` | `no_root_squash` exports (exploitable) and `rw` exports with no host restriction (informational) | manual |
 | `path` | writable dirs in root's PATH | yes |
-| `service` | writable systemd units / PathChanged hijack | yes |
+| `service` | writable systemd units AND SysV init.d scripts (both execute as root at boot/restart) | yes |
 | `kernel` | kernel-range CVEs: Dirty Pipe, Dirty Cow, OverlayFS, StackRot, nf_tables; PwnKit via pkexec | partial |
 | `cred` | passwords in history, configs, cloud metadata (imds, 800 ms timeout) | yes |
-| `preload` | `/etc/ld.so.preload` non-empty (loaded with euid 0 into every SUID binary) — HIGH/exploitable when writable, informational otherwise | manual |
+| `preload` | `/etc/ld.so.preload` non-empty (loaded with euid 0 into every SUID binary) and writable `ld.so.conf`/`ld.so.conf.d` (library search paths absorbed by the next ldconfig) — HIGH/exploitable when writable, informational otherwise | manual |
 | `sudoers` | writable `/etc/sudoers` (append NOPASSWD rule, auto) or writable `/etc/sudoers.d` (drop-in, manual: sudo requires root-owned files); per-file pass surfaces root-owned writable drop-ins behind a locked dir | partial |
 | `group` | writable `/etc/group` — append yourself to sudo/wheel/docker, effective next login | manual |
 | `hooks` | writable login-time hooks: `/etc/environment` (LD_PRELOAD into every session), `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc` | manual |
@@ -182,7 +187,7 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 }
 ```
 
-**Markdown** (`--report audit.md`) — a summary table with the at-a-glance counts (findings, exploitable, hardening score, auto/manual vectors, risk distribution), then per-vector sections with the command, the risk and the evidence lines, suitable for an engagement appendix.
+**Markdown** (`--report audit.md`) — a summary table with the at-a-glance counts (findings, exploitable, hardening score, auto/manual vectors, risk distribution), per-vector sections with the command, the risk and the evidence lines, and a `## Hardening plan` section: the exact remediation playbook for every source the scan actually detected. Suitable as an engagement appendix that carries its own checklist.
 
 **SARIF** (`--sarif audit.sarif`) — the findings dressed as a SARIF 2.1.0 log, the format GitHub's code-scanning tab, GitLab and every SARIF viewer ingest natively: one rule per finding source, `error`/`warning`/`note` levels mapped from the risk scale, `file://` locations for path targets (non-path targets like `ALL` or CVE ids embed the target into the message instead). Written 0600 like every other report artifact. Upload it with `github/codeql-action/upload-sarif@v3` and the scan shows up in the Security tab — no converter, no external dependency.
 
@@ -229,7 +234,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-109 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary), the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before), the baseline diff (new/resolved classification keyed by source+target, JSON shape without `null`s, fail-fast validation of foreign JSON files, score trajectory rendering), the `--fail-on` gate (threshold parsing, exploitable-only counting), the preload/sudoers scanners (entry counting, writable-vs-informational honesty, idempotent sudoers write with newline compensation, per-file drop-in pass gated on a locked directory), the hardening score (exact penalty weights, determinism, clamping, summary/diff integration), the SARIF export (rule dedup in first-appearance order, level mapping, path-only locations, 0600 writes), the group and login-hook scanners (writable-vs-silence honesty, shape-mismatch guard) and the `--parallel` engine (byte-identical merge under out-of-order completion, stealth-forces-sequential). CI runs build, vet, gofmt, the full test suite with `-count=1` AND `-race` on every push to `main` — plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
+118 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary), the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before), the baseline diff (new/resolved classification keyed by source+target, JSON shape without `null`s, fail-fast validation of foreign JSON files, score trajectory rendering), the `--fail-on` gate (threshold parsing, exploitable-only counting), the preload/sudoers scanners (entry counting, writable-vs-informational honesty, idempotent sudoers write with newline compensation, per-file drop-in pass gated on a locked directory), the hardening score (exact penalty weights, determinism, clamping, summary/diff integration), the SARIF export (rule dedup in first-appearance order, level mapping, path-only locations, 0600 writes), the group and login-hook scanners (writable-vs-silence honesty, shape-mismatch guard) and the `--parallel` engine (byte-identical merge under out-of-order completion, stealth-forces-sequential). CI runs build, vet, gofmt, the full test suite with `-count=1` AND `-race` on every push to `main` — plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
 
 ## License
 
