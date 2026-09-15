@@ -20,6 +20,45 @@ var validVectors = map[string]bool{
 	"group": true, "hooks": true,
 }
 
+// vectorCatalog documents what each --vector name actually inspects. It is
+// the single source of truth for --list-vectors (the documentation mode);
+// TestVectorCatalogCoversValidVectors pins it to validVectors so the two
+// maps can never drift apart — a new vector cannot ship without a catalog
+// entry and a catalog entry cannot survive its vector being removed.
+type vectorDoc struct {
+	Desc string // what the vector inspects, one honest sentence
+}
+
+var vectorCatalog = map[string]vectorDoc{
+	"suid":      {Desc: "SUID binaries owned by root that the embedded GTFOBins db knows how to turn into a root shell"},
+	"sgid":      {Desc: "SGID binaries owned by the root group — group-level privilege, never uid 0 directly"},
+	"sudo":      {Desc: "sudo rules visible to this user (sudo -l) and the sudo version on record"},
+	"cron":      {Desc: "writable cron jobs, spools and PATH entries, plus wildcard-injection candidates"},
+	"passwd":    {Desc: "writable /etc/passwd — inject a uid-0 user directly"},
+	"shadow":    {Desc: "readable or writable /etc/shadow — crack or overwrite a root hash"},
+	"docker":    {Desc: "docker group membership or reachable docker socket — mount the host filesystem into a container"},
+	"container": {Desc: "container runtime context (podman, containerd, docker daemon) — escape surface"},
+	"caps":      {Desc: "file capabilities and the effective permitted set (cap_setuid, cap_dac_override, …)"},
+	"nfs":       {Desc: "NFS exports with no_root_squash or world-writable rw exports"},
+	"path":      {Desc: "writable directories on PATH — hijack binaries a privileged context executes"},
+	"service":   {Desc: "writable systemd units and init.d scripts executed by root"},
+	"kernel":    {Desc: "kernel version matched against known CVEs (heuristic — verify before use)"},
+	"cred":      {Desc: "credentials in shell history files and common config files"},
+	"preload":   {Desc: "writable ld.so.preload, ld.so.conf or ld.so.conf.d — shared-object injection"},
+	"sudoers":   {Desc: "writable sudoers file, sudoers.d directory or per-file drop-ins"},
+	"group":     {Desc: "writable /etc/group — add yourself to a privileged group"},
+	"hooks":     {Desc: "writable login hooks: /etc/environment, /etc/profile.d, /etc/profile, /etc/bash.bashrc"},
+}
+
+// vectorCatalogOrder lists the catalog keys in the canonical order used by
+// --list-vectors (matching the order --vector documents them, not sorted —
+// the display groups the classic vectors first).
+var vectorCatalogOrder = []string{
+	"suid", "sgid", "sudo", "sudoers", "cron", "passwd", "shadow", "group",
+	"docker", "container", "caps", "nfs", "path", "service", "kernel",
+	"cred", "preload", "hooks",
+}
+
 // parseVectorList splits and validates a comma-separated --vector argument.
 // "all" is an alias (R34) that expands to every valid vector in sorted
 // order — an alias, never a new category: it can only expand into names

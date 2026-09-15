@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -103,6 +104,14 @@ func main() {
 		}
 	}
 
+	if p.Opts.HTML != "" {
+		if err := p.WriteHTMLReport(p.Opts.HTML); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] html write failed: %v\n", err)
+		} else if !p.Opts.Quiet && !p.Opts.JSON {
+			fmt.Println(colorize("  [+] HTML report written: "+p.Opts.HTML, AnsiGreen))
+		}
+	}
+
 	if p.Opts.JSON {
 		if err := p.ExportJSON(); err != nil {
 			fmt.Fprintf(os.Stderr, "  [-] json export failed: %v\n", err)
@@ -158,6 +167,41 @@ func main() {
 	}
 }
 
+// failOnNewFlag implements flag.Value for --fail-on-new: a bool-style flag
+// that ALSO accepts an optional risk threshold via --fail-on-new=<risk>.
+// IsBoolFlag() true makes bare --fail-on-new parse (Set("")) instead of
+// swallowing the next argument; --fail-on-new=high lands in Set("high").
+// Invalid thresholds fail fast at parse time — a misconfigured CI gate must
+// never scan for minutes before discovering its typo (same contract as
+// --fail-on).
+type failOnNewFlag struct{ opts *Options }
+
+func (f failOnNewFlag) String() string {
+	if f.opts == nil || !f.opts.FailOnNew {
+		return ""
+	}
+	if f.opts.FailOnNewRisk <= RiskSafe {
+		return "true"
+	}
+	return strings.ToLower(f.opts.FailOnNewRisk.String())
+}
+
+func (f failOnNewFlag) IsBoolFlag() bool { return true }
+
+func (f failOnNewFlag) Set(s string) error {
+	if s == "" || s == "true" {
+		f.opts.FailOnNew = true
+		f.opts.FailOnNewRisk = RiskSafe
+		return nil
+	}
+	if !validMaxRisk(s) {
+		return fmt.Errorf("invalid --fail-on-new threshold %q (valid: low, medium, high, danger)", s)
+	}
+	f.opts.FailOnNew = true
+	f.opts.FailOnNewRisk = parseMaxRisk(s)
+	return nil
+}
+
 // computeExitCode distills the end-of-run decision into (code, message).
 // Pure function over the final run state — testable without spawning the
 // binary. Documented semantics preserved bit for bit: 1 for exploit-without-
@@ -166,7 +210,9 @@ func main() {
 // When the gates are set but do NOT trip, the verdict falls through to the
 // classic 0/1 (round-8 contract: gate pass does not mask a failed exploit).
 // The policy gate takes message precedence over the regression gate when
-// both trip — both exit 3 anyway.
+// both trip — both exit 3 anyway. The regression gate honors the optional
+// --fail-on-new=<risk> threshold: only new exploitable findings at/above it
+// count (bare = any new exploitable, the round-11 behavior).
 func computeExitCode(p *AutoPrivilege) (int, string) {
 	code := 0
 	if p.Opts.Exploit && !p.Opts.DryRun && !p.Rooted && !isRoot() {
@@ -176,11 +222,72 @@ func computeExitCode(p *AutoPrivilege) (int, string) {
 		return 3, fmt.Sprintf("  [!] policy gate: %d exploitable finding(s) at/above %s — exit 3\n",
 			n, p.Opts.FailOnRisk.String())
 	}
-	if p.Opts.FailOnNew && p.Diff != nil && p.Diff.NewExploitable > 0 {
-		return 3, fmt.Sprintf("  [!] regression gate: %d new exploitable finding(s) since baseline — exit 3\n",
-			p.Diff.NewExploitable)
+	if p.Opts.FailOnNew && p.Diff != nil {
+		// Threshold semantics: bare --fail-on-new (FailOnNewRisk ==
+		// RiskSafe) counts every new exploitable finding; an explicit
+		// --fail-on-new=<risk> counts only findings at/above it.
+		// Informational findings never trip the gate — it watches the
+		// actionable surface, not the noise (round-11 contract).
+		n := 0
+		for _, f := range p.Diff.New {
+			if f.Exploitable && f.Risk >= p.Opts.FailOnNewRisk {
+				n++
+			}
+		}
+		if n > 0 {
+			thr := ""
+			if p.Opts.FailOnNewRisk > RiskSafe {
+				thr = fmt.Sprintf(" at/above %s", p.Opts.FailOnNewRisk.String())
+			}
+			return 3, fmt.Sprintf("  [!] regression gate: %d new exploitable finding(s)%s since baseline — exit 3\n",
+				n, thr)
+		}
 	}
 	return code, ""
+}
+
+// registerFlags declares every CLI flag on fs, writing into opts (risk and
+// showVersion stay outside Options because run() post-processes them).
+// Single source of truth for the CLI surface: TestFlagUsageParity builds a
+// private FlagSet through this same function, so the usage-text comparison
+// is hermetic (never polluted by the testing framework's own -test.* flags)
+// and a new flag cannot ship without surfacing in usage() — and vice versa.
+func registerFlags(fs *flag.FlagSet, opts *Options, risk *string, showVersion *bool) {
+	fs.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
+	fs.StringVar(risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
+	fs.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers,group,hooks")
+	fs.BoolVar(&opts.JSON, "json", false, "JSON output")
+	fs.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
+	fs.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
+	fs.BoolVar(&opts.Stealth, "stealth", false, "Add jitter between scanners and exploits")
+	fs.BoolVar(&opts.OneShot, "one-shot", false, "Stop after first successful exploit")
+	fs.StringVar(&opts.LHost, "lhost", "", "Listener host for reverse shells")
+	fs.StringVar(&opts.LPort, "lport", "4444", "Listener port for reverse shells")
+	fs.BoolVar(&opts.DryRun, "dry-run", false, "Scan and enumerate only, no exploitation")
+	fs.StringVar(&opts.LogFormat, "log", "text", "Log format: text, json")
+	fs.BoolVar(&opts.UpdateGTFO, "update-gtfobins", false, "Update and persist the GTFOBins database")
+	fs.BoolVar(&opts.NoColor, "no-color", false, "Disable ANSI colors (auto-off when piped)")
+	fs.BoolVar(&opts.Verbose, "verbose", false, "Verbose logging on stderr")
+	fs.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
+	fs.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
+	fs.StringVar(&opts.Output, "output", "", "Write the JSON report to this file (0600)")
+	fs.StringVar(&opts.Baseline, "baseline", "", "Diff findings against a previous --json/--output report")
+	fs.StringVar(&opts.FailOn, "fail-on", "", "Exit 3 if any exploitable finding at/above this risk: low, medium, high, danger")
+	// --fail-on-new is a bool-style flag with an OPTIONAL value: bare
+	// --fail-on-new trips on any new exploitable finding,
+	// --fail-on-new=high raises the bar to regressions at/above high.
+	// Implemented as a custom flag.Value with IsBoolFlag() so both
+	// spellings parse natively (Set("") for bare, Set(v) for =v).
+	fs.Var(failOnNewFlag{opts}, "fail-on-new", "Exit 3 if NEW exploitable findings appear vs --baseline (requires it); optional threshold: --fail-on-new=low|medium|high|danger")
+	fs.StringVar(&opts.HTML, "html", "", "Write a self-contained HTML report to this path (0600)")
+	fs.BoolVar(&opts.ListVectors, "list-vectors", false, "Print the supported vector catalog and exit")
+	fs.StringVar(&opts.Sarif, "sarif", "", "Write a SARIF 2.1.0 report for code-scanning dashboards (GitHub/GitLab)")
+	fs.BoolVar(&opts.SarifStdout, "sarif-stdout", false, "Print the SARIF log to stdout (exclusive with --json)")
+	fs.BoolVar(&opts.Parallel, "parallel", false, "Run scanners concurrently (results identical to sequential)")
+	fs.StringVar(&opts.Explain, "explain", "", "Print the hardening playbook for a source (or all) and exit: e.g. cron")
+	fs.StringVar(&opts.Ignore, "ignore", "", "Comma-separated finding sources to exclude entirely: e.g. CRED,CONTAINER")
+	fs.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
+	fs.BoolVar(showVersion, "version", false, "Print version and exit")
 }
 
 func run() *AutoPrivilege {
@@ -189,34 +296,7 @@ func run() *AutoPrivilege {
 	var showVersion bool
 	var baseline *jsonReport
 
-	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
-	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers,group,hooks")
-	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
-	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
-	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
-	flag.BoolVar(&opts.Stealth, "stealth", false, "Add jitter between scanners and exploits")
-	flag.BoolVar(&opts.OneShot, "one-shot", false, "Stop after first successful exploit")
-	flag.StringVar(&opts.LHost, "lhost", "", "Listener host for reverse shells")
-	flag.StringVar(&opts.LPort, "lport", "4444", "Listener port for reverse shells")
-	flag.BoolVar(&opts.DryRun, "dry-run", false, "Scan and enumerate only, no exploitation")
-	flag.StringVar(&opts.LogFormat, "log", "text", "Log format: text, json")
-	flag.BoolVar(&opts.UpdateGTFO, "update-gtfobins", false, "Update and persist the GTFOBins database")
-	flag.BoolVar(&opts.NoColor, "no-color", false, "Disable ANSI colors (auto-off when piped)")
-	flag.BoolVar(&opts.Verbose, "verbose", false, "Verbose logging on stderr")
-	flag.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
-	flag.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
-	flag.StringVar(&opts.Output, "output", "", "Write the JSON report to this file (0600)")
-	flag.StringVar(&opts.Baseline, "baseline", "", "Diff findings against a previous --json/--output report")
-	flag.StringVar(&opts.FailOn, "fail-on", "", "Exit 3 if any exploitable finding at/above this risk: low, medium, high, danger")
-	flag.BoolVar(&opts.FailOnNew, "fail-on-new", false, "Exit 3 if any NEW exploitable finding appears vs --baseline (requires it)")
-	flag.StringVar(&opts.Sarif, "sarif", "", "Write a SARIF 2.1.0 report for code-scanning dashboards (GitHub/GitLab)")
-	flag.BoolVar(&opts.SarifStdout, "sarif-stdout", false, "Print the SARIF report to stdout (exclusive with --json)")
-	flag.BoolVar(&opts.Parallel, "parallel", false, "Run scanners concurrently (results identical to sequential)")
-	flag.StringVar(&opts.Explain, "explain", "", "Print the hardening playbook for a source (or all) and exit: e.g. cron")
-	flag.StringVar(&opts.Ignore, "ignore", "", "Comma-separated finding sources to exclude entirely: e.g. CRED,CONTAINER")
-	flag.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
-	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
+	registerFlags(flag.CommandLine, &opts, &risk, &showVersion)
 
 	flag.Usage = usage
 	flag.Parse()
@@ -276,6 +356,14 @@ func run() *AutoPrivilege {
 
 	if opts.ListGTFO {
 		printGTFOList()
+		os.Exit(0)
+	}
+
+	// The vector catalog is a documentation mode like --list-gtfo:
+	// print what --vector accepts (with what each vector actually
+	// scans) and exit without scanning — same fail-fast contract.
+	if opts.ListVectors {
+		printVectorList()
 		os.Exit(0)
 	}
 

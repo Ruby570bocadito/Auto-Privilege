@@ -12,7 +12,9 @@ Un binario Go. Cero dependencias. Resultados honestos.</p>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
 </p>
 
-<p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
+<p align="center"><img src="docs/images/demo-scan.gif" alt="Escaneo real de AUTOPRIV: banner, hallazgos y score de endurecimiento" width="820"></p>
+<p align="center"><img src="docs/images/demo-ci-gate.gif" alt="Puerta de regresión CI: baseline, aterriza un secreto, --fail-on-new=high tripia con exit 3" width="820"></p>
+<p align="center"><i>Salida real de terminal — sin maquetas. Más medios abajo: el <a href="#formatos-de-salida">informe HTML</a>, el playbook de endurecimiento y el catálogo de vectores.</i></p>
 
 ---
 
@@ -33,7 +35,8 @@ Todo en ella es deliberadamente honesto. Los vectores que no puede verificar aut
 | **Score de endurecimiento** | cada escaneo termina con una cifra determinista 0–100 de postura — ponderada por riesgo y explotabilidad — para que los diffs `--baseline` lean `score 60 → 85` en lugar de recuentos crudos |
 | **Playbook de endurecimiento** | `--explain cron` (o `all`) imprime los pasos exactos de remediación por fuente de hallazgo; `--report` incrusta una sección `## Hardening plan` construida con las fuentes realmente detectadas |
 | **Auto-explotación de más seguro a más agresivo** | técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root |
-| **Cuatro formatos de salida** | terminal humano con rampa de color, `--json` para máquinas (`--output fichero` lo persiste, 0600), `--report` markdown con evidencias, y `--sarif` para los dashboards de code-scanning de GitHub/GitLab |
+| **Cinco formatos de salida** | terminal humano con rampa de color, `--json` para máquinas (`--output fichero` lo persiste, 0600), `--report` markdown con evidencias, página `--html` autocontenida para stakeholders, y `--sarif` para los dashboards de code-scanning de GitHub/GitLab |
+| **Dos puertas CI** | `--fail-on riesgo` falla cuando la superficie EXISTE en/por encima de un riesgo; `--fail-on-new` (umbral opcional: `--fail-on-new=high`) falla solo cuando CRECE — el veredicto de regresión para pipelines de endurecimiento progresivo |
 | **Laboratorio rootless** | `lab/rootless_lab.sh` monta una caja fake-vulnerable dentro de un user namespace — sin Docker, sin root real, no toca tu sistema |
 | **Amigable para scripts** | `--quiet` + códigos de salida (`0` root, `1` sin root, `2` error, `3` puerta de política), `--no-color` automático al pipear, `NO_COLOR` respetado, `--parallel` recorta el tiempo de escaneo con resultados byte-idénticos |
 
@@ -81,6 +84,7 @@ Modos:
   --exploit                 auto-explota los vectores encontrados, del riesgo menor al mayor
   --dry-run                 escanea y muestra qué ejecutaría sin correr nada
   --list-gtfo               imprime la base GTFOBins embebida
+  --list-vectors            imprime el catálogo de vectores soportados
   --explain fuente          playbook de endurecimiento de una fuente (o all)
   --update-gtfobins         refresca la base GTFOBins desde upstream (persistida)
 
@@ -97,6 +101,7 @@ Salida:
   --json                    informe legible por máquina en stdout
   --output fichero          escribe el informe JSON a un fichero (0600)
   --report fichero          escribe además un informe markdown con evidencias
+  --html fichero            escribe un informe HTML autocontenido (0600)
   --sarif fichero           informe SARIF 2.1.0 para dashboards de code-scanning
   --sarif-stdout            imprime el log SARIF a stdout (no con --json)
   --baseline fichero        compara los hallazgos contra un informe previo --json/--output
@@ -112,6 +117,9 @@ Varios:
   --scan-timeout dur        timeout para comandos externos del escaneo (por defecto 5s)
   --fail-on riesgo          código 3 si hay hallazgos explotables >= riesgo
                             (low|medium|high|danger) — puerta de endurecimiento CI
+  --fail-on-new [riesgo]    código 3 si aparecen hallazgos explotables NUEVOS vs
+                            --baseline — puerta de regresión (la exige); umbral
+                            opcional: --fail-on-new=low|medium|high|danger
   --rooteame ruta           carga un módulo .ko al conseguir root (solo lab)
   --version                 imprime versión
   -h, --help                esta ayuda
@@ -123,6 +131,7 @@ Ejemplos:
   autoprivilege --vector=suid,sudo       centrarse en dos vectores
   autoprivilege --json > report.json     salida amigable para CI
   autoprivilege --report audit.md        informe markdown con evidencias
+  autoprivilege --html audit.html       página HTML para stakeholders
   autoprivilege --sarif audit.sarif      subida al code-scanning de GitHub
   autoprivilege --quiet --sarif-stdout | visor-sarif   el log por pipe
   autoprivilege --explain cron           cómo cerrar los hallazgos CRON
@@ -131,10 +140,15 @@ Ejemplos:
   autoprivilege --baseline base.json     muestra hallazgos nuevos/resueltos
   autoprivilege --quiet --fail-on high   puerta: exit 3 en HIGH explotables
   autoprivilege --baseline base.json --fail-on-new   CI: falla solo en regresiones
+  autoprivilege --baseline base.json --fail-on-new=high   solo regresiones HIGH+
   lab/rootless_lab.sh --exploit          demo rootless en un lab seguro
 ```
 
-Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ejecución · `3` puerta de política `--fail-on` activada (la puerta gana sobre `1`; todos los informes se escriben igualmente).
+Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ejecución · `3` puerta de política `--fail-on` o puerta de regresión `--fail-on-new` activadas (las puertas ganan sobre `1`; todos los informes se escriben igualmente).
+
+¿No sabes qué acepta `--vector`? `--list-vectors` imprime el catálogo — cada nombre de vector con una descripción de una línea de qué inspecciona realmente, leída de la misma tabla que usa el binario, así la documentación nunca puede divergir del código:
+
+<p align="center"><img src="docs/images/screenshot-vectors.png" alt="--list-vectors: el catálogo de 18 vectores" width="640"></p>
 
 ## Vectores cubiertos
 
@@ -205,6 +219,10 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 
 **Markdown** (`--report audit.md`) — una tabla resumen con los totales de un vistazo (hallazgos, explotables, score de endurecimiento, vectores auto/manual, distribución de riesgos), secciones por vector con el comando, el riesgo y las líneas de evidencia, y una sección `## Hardening plan`: el playbook exacto de remediación para cada fuente que el scan realmente detectó. Ideal como apéndice de un engagement que lleva su propia checklist.
 
+**HTML** (`--html audit.html`) — la página para compartir: un único documento autocontenido (CSS inline, cero recursos externos, sin JavaScript) que abre desde `file://` en cualquier portátil, air-gapped incluido. Tarjetas de resumen, la barra de distribución de riesgos, la tabla de hallazgos con badges coloreados, el plan de endurecimiento como playbooks plegables por fuente y el comando de cada vector en un bloque listo para copiar — todo renderizado desde el mismo buildReport que produce la exportación JSON, así la página nunca puede discrepar de la salida de máquina. Cada valor dinámico pasa por escape HTML (un fichero de credenciales que contenga `<script>` se renderiza como texto, testeado) y el fichero cae a 0600 por la misma escritura atómica que los demás informes. Adjúntalo al informe del engagement y envíalo:
+
+<p align="center"><img src="docs/images/screenshot-html-report.png" alt="El informe --html abierto en un navegador: tarjetas de resumen, barra de riesgos y tabla de hallazgos" width="820"></p>
+
 **SARIF** (`--sarif audit.sarif`) — los hallazgos vestidos de log SARIF 2.1.0, el formato que el tab de code-scanning de GitHub, GitLab y cualquier visor SARIF ingieren de forma nativa: una regla por fuente de hallazgo, niveles `error`/`warning`/`note` mapeados desde la escala de riesgo, ubicaciones `file://` para targets que son rutas (los targets no-ruta como `ALL` o los CVE ids se incrustan en el mensaje). Escrito a 0600 como el resto de artefactos. Súbelo con `github/codeql-action/upload-sarif@v3` y el escaneo aparece en la pestaña Security — sin conversores, sin dependencias externas.
 
 **Diff contra baseline** (`--baseline prev.json`) — el ciclo de endurecimiento, cerrado: haz una instantánea con `--output base.json`, corrige lo que puedas, vuelve a escanear contra la instantánea y la herramienta clasifica cada hallazgo como **nuevo** (la superficie creció) o **resuelto** (el arreglo funcionó), con clave fuente+objetivo para que un reordenado o un cambio de redacción nunca finja un cambio. El diff trae la trayectoria del score de endurecimiento (`score 60 → 85`; los baselines anteriores a la métrica muestran `baseline predates scoring` en vez de fingir una regresión) y aparece en el terminal, en el JSON (clave `"diff"` con `new`/`resolved`/`new_exploitable`/`score_after`/`summary_before`) y en una sección `## Diff vs baseline` del reporte markdown:
@@ -219,9 +237,15 @@ $ autoprivilege --baseline base.json        # día N: verificar
    score      60 → 85
 ```
 
-**Puerta de endurecimiento CI** (`--fail-on`) — convierte el escaneo en una comprobación de política: `--quiet --fail-on high` sale con código `3` cuando existe al menos un hallazgo explotable en o por encima del umbral, así un pipeline (o un cron que envía informes) falla ruidosamente en cuanto la superficie medida regresa. **Puerta de regresión** (`--fail-on-new`, exige `--baseline`) — el veredicto CI más afilado: código `3` solo cuando aparece un hallazgo explotable NUEVO respecto a la instantánea, de modo que el progreso del endurecimiento nunca falla el pipeline y una regresión siempre lo falla. Combina el conjunto: `--parallel` para velocidad, `--sarif` para el dashboard, `--fail-on-new` para el veredicto de regresión, `--report` con su `## Hardening plan` para la lista de arreglos.
+**Puerta de endurecimiento CI** (`--fail-on`) — convierte el escaneo en una comprobación de política: `--quiet --fail-on high` sale con código `3` cuando existe al menos un hallazgo explotable en o por encima del umbral, así un pipeline (o un cron que envía informes) falla ruidosamente en cuanto la superficie medida regresa. **Puerta de regresión** (`--fail-on-new [riesgo]`, exige `--baseline`) — el veredicto CI más afilado: código `3` solo cuando aparece un hallazgo explotable NUEVO respecto a la instantánea, de modo que el progreso del endurecimiento nunca falla el pipeline y una regresión siempre lo falla. El umbral opcional afina el veredicto: `--fail-on-new` a secas tripia con cualquier hallazgo explotable nuevo, `--fail-on-new=high` solo cuando la regresión es HIGH o peor — el ruido de riesgo bajo sigue en verde mientras una vía de escalada real tumba el build (los umbrales inválidos fallan en el parseo, exit 2). Combina el conjunto: `--parallel` para velocidad, `--sarif` para el dashboard, `--fail-on-new=high` para el veredicto de regresión, `--report`/`--html` con el plan de endurecimiento para la lista de arreglos.
+
+**Playbook de endurecimiento** (`--explain cron`, `--explain all`) — la mitad de remediación del ciclo: para cada fuente de hallazgo, qué significa y los pasos exactos que la cierran, de lo más seguro a lo más agresivo. El mismo playbook viaja dentro de cada `--report`/`--html` como sección por fuente construida con las fuentes que el scan realmente detectó:
+
+<p align="center"><img src="docs/images/screenshot-explain.png" alt="--explain cron: el playbook de endurecimiento CRON" width="760"></p>
 
 ## El laboratorio rootless
+
+<p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
 
 El lab es una caja fake comprometida construida dentro de un **user namespace** (`unshare -r -m`): un `/etc` temporal con passwd/shadow/cron escribibles, un `/usr/bin` bindeado con `python3` y `find` SUID. Los bits SUID solo dan el root mapeado del namespace — nunca el tuyo. Es la forma más segura de demostrar, testear y capturar el ciclo completo escaneo → enumeración → root sin Docker ni permisos especiales:
 
@@ -250,7 +274,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-124 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON), el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes), el diff contra baseline (clasificación nuevo/resuelto con clave fuente+objetivo, forma JSON sin `null`, validación fail-fast de JSON ajenos, render de la trayectoria del score), la puerta `--fail-on` (parseo del umbral, recuento solo de explotables), los scanners de preload/sudoers (recuento de entradas, honestidad escribible-vs-informativo, escritura sudoers idempotente con compensación de salto de línea, pase por fichero condicionado a directorio cerrado), el score de endurecimiento (pesos exactos de penalización, determinismo, clamping, integración en summary/diff), la decisión de exit codes extraída a función pura (0/1 clásicos, ambas puertas forzando 3, precedencia del mensaje de la puerta de política), la puerta de regresión (`--fail-on-new`: un informativo nuevo no tripia, claves re-redactadas no son nuevas, fail-fast sin `--baseline`), escrituras atómicas de reportes (contenido, 0600 fijado, sin temporales restantes), la exportación SARIF (dedup de reglas en orden de aparición, mapeo de niveles, ubicaciones solo para rutas, escrituras 0600), los scanners de grupo y hooks de login (honestidad escribible-vs-silencio, guard de forma incorrecta) y el motor `--parallel` (merge byte-idéntico con finalización fuera de orden, stealth fuerza secuencial). Las escrituras de reportes (`--output`, `--report`, `--sarif`) son atómicas (fichero temporal + rename): un crash a mitad de scan nunca deja un artefacto truncado que el `--baseline` o una puerta malinterpreten en la siguiente ejecución. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` Y `-race` en cada push a `main`, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
+133 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON), el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes), el diff contra baseline (clasificación nuevo/resuelto con clave fuente+objetivo, forma JSON sin `null`, validación fail-fast de JSON ajenos, render de la trayectoria del score), la puerta `--fail-on` (parseo del umbral, recuento solo de explotables), los scanners de preload/sudoers (recuento de entradas, honestidad escribible-vs-informativo, escritura sudoers idempotente con compensación de salto de línea, pase por fichero condicionado a directorio cerrado), el score de endurecimiento (pesos exactos de penalización, determinismo, clamping, integración en summary/diff), la decisión de exit codes extraída a función pura (0/1 clásicos, ambas puertas forzando 3, precedencia del mensaje de la puerta de política), la puerta de regresión (`--fail-on-new`: un informativo nuevo no tripia, claves re-redactadas no son nuevas, fail-fast sin `--baseline`, umbral de riesgo opcional respetado), escrituras atómicas de reportes (contenido, 0600 fijado, sin temporales restantes), la exportación SARIF (dedup de reglas en orden de aparición, mapeo de niveles, ubicaciones solo para rutas, escrituras 0600), los scanners de grupo y hooks de login (honestidad escribible-vs-silencio, guard de forma incorrecta), el motor `--parallel` (merge byte-idéntico con finalización fuera de orden, stealth fuerza secuencial) y las adiciones de la ronda 12: el informe HTML (escape XSS del texto de hallazgos, estructura autocontenida sin referencias externas, permisos 0600, sección de diff, plan de endurecimiento vacío-seguro), el umbral de la puerta de regresión (`--fail-on-new=high` ignora una regresión MEDIUM y tripia con DANGER y el mensaje at/above; comportamiento bare fijado), el parseo del flag `--fail-on-new` (bare vs `=valor`, umbral inválido rechazado en parseo), el catálogo de vectores (anclado a `validVectors` en ambas direcciones, descripciones con contenido, la salida del printer cubre todos los nombres) y la paridad flags↔usage como test HERMÉTICO (un FlagSet privado construido con el mismo registerFlags del binario — un flag nuevo no puede salir sin documentar, y el usage no puede anunciar un fantasma). Las escrituras de reportes (`--output`, `--report`, `--html`, `--sarif`) son atómicas (fichero temporal + rename): un crash a mitad de scan nunca deja un artefacto truncado que el `--baseline` o una puerta malinterpreten en la siguiente ejecución. La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` Y `-race` en cada push a `main`, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
 
 ## Licencia
 

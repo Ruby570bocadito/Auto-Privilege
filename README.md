@@ -12,7 +12,9 @@ One Go binary. Zero dependencies. Honest results.</p>
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
 </p>
 
-<p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
+<p align="center"><img src="docs/images/demo-scan.gif" alt="AUTOPRIV real scan: banner, findings and hardening score" width="820"></p>
+<p align="center"><img src="docs/images/demo-ci-gate.gif" alt="CI regression gate: baseline, a secret lands, --fail-on-new=high trips with exit 3" width="820"></p>
+<p align="center"><i>Real terminal output — no mockups. More media below: the <a href="#output-formats">HTML report</a>, the hardening playbook and the vector catalog.</i></p>
 
 ---
 
@@ -32,9 +34,9 @@ Everything is deliberate about its honesty. Vectors it cannot verify automatical
 | **75 GTFOBins techniques + 31 sgid** | embedded in the binary — works air-gapped; refreshable from upstream with one command (`--list-gtfo` shows the sgid section) |
 | **Hardening score** | every scan ends with a deterministic 0–100 posture number — weighted by risk and exploitability — so `--baseline` diffs read `score 60 → 85` instead of raw counts |
 | **Hardening playbook** | `--explain cron` (or `all`) prints the exact remediation steps per finding source; `--report` embeds a `## Hardening plan` section built from the sources actually detected |
-| **Hardening playbook** | `--explain cron` (or `all`) prints the exact remediation steps per finding source; `--report` embeds a `## Hardening plan` section built from the sources actually detected |
 | **Safest-first auto-exploit** | techniques sorted by risk, `--risk` cap, `--one-shot` stop at first root |
-| **Four output formats** | human terminal with truecolor ramp, `--json` for machines (`--output file` persists it, 0600), markdown `--report` with evidence, and `--sarif` for GitHub/GitLab code-scanning dashboards |
+| **Five output formats** | human terminal with truecolor ramp, `--json` for machines (`--output file` persists it, 0600), markdown `--report` with evidence, self-contained `--html` page for stakeholders, and `--sarif` for GitHub/GitLab code-scanning dashboards |
+| **Two CI gates** | `--fail-on risk` fails when the surface EXISTS at/above a risk; `--fail-on-new` (optional threshold: `--fail-on-new=high`) fails only when it GROWS — the regression verdict for progressive-hardening pipelines |
 | **Rootless demo lab** | `lab/rootless_lab.sh` builds a fake-vulnerable box inside a user namespace — no Docker, no real root, nothing touches your system |
 | **Script-friendly** | `--quiet` + exit codes (`0` root, `1` no root, `2` error, `3` policy gate), `--no-color` auto when piped, `NO_COLOR` respected, `--parallel` cuts scan wall-clock with byte-identical results |
 
@@ -82,6 +84,7 @@ Modes:
   --exploit                 auto-exploit found vectors, safest first
   --dry-run                 scan + enumerate, show what would run
   --list-gtfo               print the embedded GTFOBins database
+  --list-vectors            print the supported vector catalog
   --explain src             hardening playbook for a finding source (or all)
   --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
@@ -98,6 +101,7 @@ Output:
   --json                    machine-readable report on stdout
   --output file             write the JSON report to a file (0600)
   --report file             also write a markdown evidence report
+  --html file               write a self-contained HTML report (0600)
   --sarif file              SARIF 2.1.0 report for code-scanning dashboards
   --sarif-stdout            print the SARIF log to stdout (not with --json)
   --baseline file           diff findings against a previous --json/--output report
@@ -113,12 +117,19 @@ Misc:
   --scan-timeout dur        timeout for scan-time external commands (default 5s)
   --fail-on risk            exit 3 when exploitable findings >= risk
                             (low|medium|high|danger) — CI hardening gate
+  --fail-on-new [risk]      exit 3 when NEW exploitable findings appear vs
+                            --baseline — regression gate (requires it);
+                            optional threshold: --fail-on-new=low|medium|high|danger
   --rooteame path           load .ko module if root is obtained (lab only)
   --version                 print version
   -h, --help                this help
 ```
 
-Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error · `3` `--fail-on` policy gate tripped (the gate wins over `1`; all reports are written either way).
+Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error · `3` `--fail-on` policy gate or `--fail-on-new` regression gate tripped (gates win over `1`; all reports are written either way).
+
+Not sure what `--vector` accepts? `--list-vectors` prints the catalog — every vector name with a one-line description of what it actually inspects, read from the same table the binary itself uses, so the docs can never drift from the code:
+
+<p align="center"><img src="docs/images/screenshot-vectors.png" alt="--list-vectors: the 18-vector catalog" width="640"></p>
 
 ## Vectors covered
 
@@ -189,6 +200,10 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 
 **Markdown** (`--report audit.md`) — a summary table with the at-a-glance counts (findings, exploitable, hardening score, auto/manual vectors, risk distribution), per-vector sections with the command, the risk and the evidence lines, and a `## Hardening plan` section: the exact remediation playbook for every source the scan actually detected. Suitable as an engagement appendix that carries its own checklist.
 
+**HTML** (`--html audit.html`) — the shareable page: one self-contained document (inline CSS, zero external resources, no JavaScript) that opens from `file://` on any laptop, air-gapped included. Summary cards, the risk-distribution bar, the findings table with color-coded badges, the hardening plan as collapsible per-source playbooks and every vector command in a copy-ready block — all rendered from the same buildReport the JSON export produces, so the page can never disagree with the machine output. Every dynamic value is HTML-escaped (a credential file containing `<script>` renders as text, tested) and the file lands 0600 through the same atomic write as the other reports. Attach it to the engagement doc and send it:
+
+<p align="center"><img src="docs/images/screenshot-html-report.png" alt="The --html report opened in a browser: summary cards, risk bar and findings table" width="820"></p>
+
 **SARIF** (`--sarif audit.sarif`) — the findings dressed as a SARIF 2.1.0 log, the format GitHub's code-scanning tab, GitLab and every SARIF viewer ingest natively: one rule per finding source, `error`/`warning`/`note` levels mapped from the risk scale, `file://` locations for path targets (non-path targets like `ALL` or CVE ids embed the target into the message instead). Written 0600 like every other report artifact. Upload it with `github/codeql-action/upload-sarif@v3` and the scan shows up in the Security tab — no converter, no external dependency.
 
 **Baseline diff** (`--baseline prev.json`) — the hardening loop, closed: snapshot a machine with `--output base.json`, fix what you can, re-scan against the snapshot and the tool classifies every finding as **new** (surface grew) or **resolved** (fix worked), keyed by source+target so reordering or rewording never fakes a change. The diff carries the hardening-score trajectory (`score 60 → 85`; baselines written before the metric existed render `baseline predates scoring` instead of faking a regression) and appears in the terminal, in the JSON (`"diff"` key with `new`/`resolved`/`new_exploitable`/`score_after`/`summary_before`) and in a `## Diff vs baseline` section of the markdown report:
@@ -203,9 +218,15 @@ $ autoprivilege --baseline base.json        # day N: verify
    score      60 → 85
 ```
 
-**CI hardening gate** (`--fail-on`) — turn the scan into a policy check: `--quiet --fail-on high` exits `3` when at least one exploitable finding sits at or above the threshold, so a pipeline (or a cron job shipping reports) fails loudly the moment the measured surface regresses. **Regression gate** (`--fail-on-new`, requires `--baseline`) — the sharper CI verdict: exit `3` only when a NEW exploitable finding appears versus the snapshot, so hardening progress never fails the pipeline and a regression always does. Compose the set: `--parallel` for speed, `--sarif` for the dashboard, `--fail-on-new` for the regression verdict, `--report` with its `## Hardening plan` for the fix list.
+**CI hardening gate** (`--fail-on`) — turn the scan into a policy check: `--quiet --fail-on high` exits `3` when at least one exploitable finding sits at or above the threshold, so a pipeline (or a cron job shipping reports) fails loudly the moment the measured surface regresses. **Regression gate** (`--fail-on-new [risk]`, requires `--baseline`) — the sharper CI verdict: exit `3` only when a NEW exploitable finding appears versus the snapshot, so hardening progress never fails the pipeline and a regression always does. The optional threshold narrows the verdict: bare `--fail-on-new` trips on any new exploitable finding, `--fail-on-new=high` only when the regression is HIGH or worse — noisy low-risk drift stays green while a real escalation path fails the build (invalid thresholds fail fast at parse time, exit 2). Compose the set: `--parallel` for speed, `--sarif` for the dashboard, `--fail-on-new=high` for the regression verdict, `--report`/`--html` with the hardening plan for the fix list.
+
+**Hardening playbook** (`--explain cron`, `--explain all`) — the remediation half of the loop: for every finding source, what it means and the exact steps that close it, safest first. The same playbook ships inside every `--report`/`--html` as a per-source section built from the sources the scan actually detected:
+
+<p align="center"><img src="docs/images/screenshot-explain.png" alt="--explain cron: the CRON hardening playbook" width="760"></p>
 
 ## The rootless lab
+
+<p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
 
 The lab is a fake compromised box built inside a **user namespace** (`unshare -r -m`): a temporary `/etc` with writable passwd/shadow/cron, a bind-mounted `/usr/bin` seeded with SUID `python3` and `find`. The SUID bits only grant the namespace's mapped root — never yours. It is the safest way to demo, test and screenshot the full scan → enumerate → root cycle without Docker or any privileged setup:
 
@@ -234,7 +255,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-124 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary), the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before), the baseline diff (new/resolved classification keyed by source+target, JSON shape without `null`s, fail-fast validation of foreign JSON files, score trajectory rendering), the `--fail-on` gate (threshold parsing, exploitable-only counting), the preload/sudoers scanners (entry counting, writable-vs-informational honesty, idempotent sudoers write with newline compensation, per-file drop-in pass gated on a locked directory), the hardening score (exact penalty weights, determinism, clamping, summary/diff integration), the end-of-run exit-code decision extracted into a pure function (classic 0/1, both gates overriding to 3, policy-message precedence), the regression gate (`--fail-on-new`: new-informational does not trip, reworded keys are not new, fail-fast without `--baseline`), atomic report writes (content, pinned 0600, no temp leftovers), the SARIF export (rule dedup in first-appearance order, level mapping, path-only locations, 0600 writes), the group and login-hook scanners (writable-vs-silence honesty, shape-mismatch guard) and the `--parallel` engine (byte-identical merge under out-of-order completion, stealth-forces-sequential). Report writes (`--output`, `--report`, `--sarif`) are atomic (temp file + rename): a crash mid-scan can never leave a truncated artifact for the next run's `--baseline` or gate to misread. CI runs build, vet, gofmt, the full test suite with `-count=1` AND `-race` on every push to `main` — plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
+133 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary), the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before), the baseline diff (new/resolved classification keyed by source+target, JSON shape without `null`s, fail-fast validation of foreign JSON files, score trajectory rendering), the `--fail-on` gate (threshold parsing, exploitable-only counting), the preload/sudoers scanners (entry counting, writable-vs-informational honesty, idempotent sudoers write with newline compensation, per-file drop-in pass gated on a locked directory), the hardening score (exact penalty weights, determinism, clamping, summary/diff integration), the end-of-run exit-code decision extracted into a pure function (classic 0/1, both gates overriding to 3, policy-message precedence), the regression gate (`--fail-on-new`: new-informational does not trip, reworded keys are not new, fail-fast without `--baseline`, optional risk threshold honored), atomic report writes (content, pinned 0600, no temp leftovers), the SARIF export (rule dedup in first-appearance order, level mapping, path-only locations, 0600 writes), the group and login-hook scanners (writable-vs-silence honesty, shape-mismatch guard), the `--parallel` engine (byte-identical merge under out-of-order completion, stealth-forces-sequential) and the round-12 additions: the HTML report (XSS escaping of finding text, self-contained structure with zero external references, 0600 perms, diff section, empty-safe hardening plan), the regression-gate threshold (`--fail-on-new=high` ignores a MEDIUM regression and trips on DANGER with the at/above message; bare behavior pinned), the `--fail-on-new` flag parsing (bare vs `=value`, invalid threshold rejected at parse time), the vector catalog (pinned to `validVectors` in both directions, every description meaningful, printer output covers all names) and the flags↔usage parity as a HERMETIC test (a private FlagSet built through the same registerFlags the binary uses — a new flag cannot ship undocumented, and usage cannot advertise a ghost). Report writes (`--output`, `--report`, `--html`, `--sarif`) are atomic (temp file + rename): a crash mid-scan can never leave a truncated artifact for the next run's `--baseline` or gate to misread. CI runs build, vet, gofmt, the full test suite with `-count=1` AND `-race` on every push to `main` — plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
 
 ## License
 

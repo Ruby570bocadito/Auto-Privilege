@@ -63,6 +63,7 @@ func usage() {
     --dry-run                 scan + enumerate, show what would run
     --list-gtfo               print the embedded GTFOBins database
     --explain src             hardening playbook for a finding source (or all)
+    --list-vectors            print the supported vector catalog
     --update-gtfobins         refresh GTFOBins db from upstream (persisted)
 
   Targeting:
@@ -78,6 +79,7 @@ func usage() {
     --json                    machine-readable report on stdout
     --output file             write the JSON report to a file (0600)
     --report file             also write a markdown evidence report
+    --html file               write a self-contained HTML report (0600)
     --sarif file              SARIF 2.1.0 report for code-scanning dashboards
     --sarif-stdout            print the SARIF log to stdout (not with --json)
     --baseline file           diff findings against a previous --json/--output report
@@ -93,8 +95,9 @@ func usage() {
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
     --fail-on risk            exit 3 when exploitable findings >= risk
                               (low|medium|high|danger) — CI hardening gate
-    --fail-on-new             exit 3 when any NEW exploitable finding appears
-                              vs --baseline — regression gate (requires it)
+    --fail-on-new [risk]      exit 3 when NEW exploitable findings appear vs
+                              --baseline — regression gate (requires it);
+                              optional threshold: --fail-on-new=low|medium|high|danger
     --rooteame path           load .ko module if root is obtained (lab only)
     --version                 print version
     -h, --help                this help
@@ -106,6 +109,7 @@ func usage() {
     autoprivilege --vector=suid,sudo       focus two specific vectors
     autoprivilege --json > report.json     CI-friendly output
     autoprivilege --report audit.md        markdown evidence report
+    autoprivilege --html audit.html       shareable HTML page for stakeholders
     autoprivilege --sarif audit.sarif      GitHub code-scanning upload
     autoprivilege --quiet --sarif-stdout | sarif-viewer   pipe the log
     autoprivilege --explain cron           how to close the CRON findings
@@ -114,6 +118,7 @@ func usage() {
     autoprivilege --baseline base.json     show new/resolved findings
     autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high
     autoprivilege --baseline base.json --fail-on-new   CI: fail only on regressions
+    autoprivilege --baseline base.json --fail-on-new=high   only HIGH+ regressions
     lab/rootless_lab.sh --exploit          safe rootless demo lab
 `
 	fmt.Fprintln(os.Stderr, colorize(out, AnsiGrey))
@@ -238,6 +243,27 @@ func wrapCols(items []string, sep string) string {
 	return b.String()
 }
 
+// printVectorList dumps the vector catalog — what --vector accepts and what
+// each name actually inspects. Documentation mode like --list-gtfo: honest
+// one-liners, no advice that outscopes the scanner. Order comes from
+// vectorCatalogOrder (pinned to validVectors by test).
+func printVectorList() {
+	fmt.Printf("  %s (%d vectors — all read-only)\n\n", colorize("── Vector catalog ──", AnsiCyan), len(vectorCatalogOrder))
+	for _, name := range vectorCatalogOrder {
+		doc, ok := vectorCatalog[name]
+		if !ok {
+			// Defensive: the test pins the catalog to validVectors, but the
+			// printer must stay honest if the maps ever diverge.
+			fmt.Printf("  %-10s %s\n", colorize(name, AnsiBold), colorize("(no catalog entry — report it)", AnsiYellow))
+			continue
+		}
+		fmt.Printf("  %-10s %s\n", colorize(name, AnsiBold), doc.Desc)
+	}
+	fmt.Println()
+	fmt.Println(colorize("  usage: --vector <name[,name2,…]>  ·  all expands to every vector", AnsiGrey))
+}
+
+// printSummary renders the end-of-run summary block.
 func printSummary(p *AutoPrivilege, elapsed time.Duration) {
 	if p.Opts.JSON || p.Opts.Quiet {
 		return
@@ -284,6 +310,9 @@ func printSummary(p *AutoPrivilege, elapsed time.Duration) {
 	fmt.Printf("   %-10s %s\n", "time", elapsed.Round(100*time.Millisecond))
 	if p.Opts.Report != "" {
 		fmt.Printf("   %-10s %s\n", "report", p.Opts.Report)
+	}
+	if p.Opts.HTML != "" {
+		fmt.Printf("   %-10s %s\n", "html", p.Opts.HTML)
 	}
 	if p.Opts.Output != "" {
 		fmt.Printf("   %-10s %s\n", "json", p.Opts.Output)

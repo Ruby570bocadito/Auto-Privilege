@@ -108,9 +108,13 @@ type Options struct {
 	FailOnRisk    RiskLevel
 	FailOnEnabled bool
 	// FailOnNew enables the regression gate: exit 3 when the baseline diff
-	// shows ANY new exploitable finding. Requires --baseline (enforced
-	// fail-fast in run()).
-	FailOnNew bool
+	// shows new exploitable findings. Requires --baseline (enforced
+	// fail-fast in run()). FailOnNewRisk is the optional threshold set via
+	// --fail-on-new=<risk>: bare --fail-on-new leaves it at RiskSafe (any
+	// exploitable regression trips), --fail-on-new=high trips only for new
+	// exploitable findings at/above high.
+	FailOnNew     bool
+	FailOnNewRisk RiskLevel
 	// Sarif is the --sarif output path (empty = no SARIF export).
 	Sarif string
 	// SarifStdout prints the SARIF log to stdout instead of a file
@@ -127,6 +131,12 @@ type Options struct {
 	// (filled by run(), fail-fast on unknown names).
 	Ignore        string
 	IgnoreSources []string
+	// HTML is the --html output path (empty = no HTML export).
+	HTML string
+	// ListVectors prints the supported vector catalog and exits — a
+	// documentation mode like --list-gtfo, so scripts can discover what
+	// --vector accepts without parsing the usage text.
+	ListVectors bool
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the
