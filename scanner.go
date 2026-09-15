@@ -22,6 +22,7 @@ var scannerOrder = []func(*AutoPrivilege){
 	scanSetBits, scanSudo, scanCron, scanPasswd, scanShadow, scanDocker,
 	scanContainers, scanCapabilities, scanFileCaps, scanNFS, scanWritablePath,
 	scanServices, scanKernelCVE, scanPwnKit, scanSudoVersion, scanCredentials,
+	scanPreload,
 }
 
 func scanAll(p *AutoPrivilege) {
@@ -970,6 +971,69 @@ func sudoVersionOlder(ver, ref string) bool {
 		}
 	}
 	return len(a) < len(b)
+}
+
+// --- Preload + sudoers (persistence-critical configs) ---
+// preloadPaths exists so tests can point the scanner at synthetic files;
+// production code always sees the real /etc locations.
+var preloadPaths = struct {
+	preload    string
+	sudoers    string
+	sudoersDir string
+}{
+	preload:    "/etc/ld.so.preload",
+	sudoers:    "/etc/sudoers",
+	sudoersDir: "/etc/sudoers.d",
+}
+
+// scanPreload checks the two config surfaces whose compromise equals root:
+// /etc/ld.so.preload (every entry is loaded with euid 0 into EVERY SUID
+// binary on the host — escalation and persistence in one file) and the
+// sudoers tree (a writable /etc/sudoers or sudoers.d is a one-line route to
+// uid 0). Content is never printed — presence and entry count only —
+// mirroring the credential scanners' "presence, not contents" rule.
+func scanPreload(p *AutoPrivilege) {
+	scanPreloadPaths(p, preloadPaths.preload, preloadPaths.sudoers, preloadPaths.sudoersDir)
+}
+
+func scanPreloadPaths(p *AutoPrivilege, preloadPath, sudoersPath, sudoersDir string) {
+	if data, err := os.ReadFile(preloadPath); err == nil {
+		if n := countPreloadEntries(string(data)); n > 0 {
+			writable := isWritableByCurrentUser(preloadPath)
+			desc := fmt.Sprintf("%d ld.so.preload entries loaded with euid 0 into every SUID binary", n)
+			risk, exploitable := RiskLow, false
+			if writable {
+				desc += " — file writable, entries injectable"
+				risk, exploitable = RiskHigh, true
+			}
+			addFinding(p, "PRELOAD", preloadPath, desc, risk, exploitable)
+		}
+	}
+	// missing or permission-denied: silent (honest absence of evidence)
+
+	if isWritableByCurrentUser(sudoersPath) {
+		addFinding(p, "SUDOERS", sudoersPath,
+			"Writable /etc/sudoers — append a NOPASSWD ALL rule",
+			RiskHigh, true)
+	}
+	if info, err := os.Lstat(sudoersDir); err == nil && info.IsDir() && isWritableByCurrentUser(sudoersDir) {
+		addFinding(p, "SUDOERS", sudoersDir,
+			"Writable /etc/sudoers.d — drop-in rule possible (sudo requires root-owned files)",
+			RiskHigh, true)
+	}
+}
+
+// countPreloadEntries counts meaningful ld.so.preload entries: non-blank
+// lines after trimming whitespace. glibc ignores blank lines, so they are
+// not entries; any other non-blank line is a path glibc WILL attempt to load.
+func countPreloadEntries(content string) int {
+	n := 0
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
 }
 
 // --- Credential scanning ---

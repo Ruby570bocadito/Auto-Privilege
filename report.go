@@ -48,7 +48,8 @@ func buildSummary(p *AutoPrivilege) jsonSummary {
 	return s
 }
 
-// jsonReport is the enriched machine-readable document printed by --json.
+// jsonReport is the enriched machine-readable report printed by --json.
+// Diff is nil (and omitted from the JSON) unless --baseline was given.
 type jsonReport struct {
 	Tool       string      `json:"tool"`
 	Version    string      `json:"version"`
@@ -60,6 +61,7 @@ type jsonReport struct {
 	DurationMS int64       `json:"duration_ms"`
 	Rooted     bool        `json:"rooted"`
 	Summary    jsonSummary `json:"summary"`
+	Diff       *ReportDiff `json:"diff,omitempty"`
 	Findings   []Finding   `json:"findings"`
 	Vectors    []Vector    `json:"vectors"`
 }
@@ -82,6 +84,7 @@ func buildReport(p *AutoPrivilege) jsonReport {
 		DurationMS: time.Since(p.Started).Milliseconds(),
 		Rooted:     p.Rooted || isRoot(),
 		Summary:    buildSummary(p),
+		Diff:       p.Diff,
 		Findings:   findings,
 		Vectors:    vectors,
 	}
@@ -123,6 +126,9 @@ func (p *AutoPrivilege) WriteMarkdownReport(path string) error {
 	out += fmt.Sprintf("- **Duration:** %d ms\n", rep.DurationMS)
 	out += fmt.Sprintf("- **Root obtained:** %v\n", rooted)
 	out += markdownSummary(rep.Summary)
+	if rep.Diff != nil {
+		out += markdownDiff(rep.Diff)
+	}
 
 	out += "\n## Findings\n\n"
 	out += "| Source | Risk | Target | Description |\n|---|---|---|---|\n"
@@ -175,6 +181,31 @@ func markdownSummary(s jsonSummary) string {
 	out += fmt.Sprintf("| Vectors | %d (%d auto · %d manual) |\n", s.Vectors, s.Auto, s.Manual)
 	out += fmt.Sprintf("| Risks | %s |\n", riskLine)
 	out += fmt.Sprintf("| Root obtained | %v |\n", s.Rooted)
+	return out
+}
+
+// markdownDiff renders the baseline-comparison section of the markdown
+// report. Only NEW findings are listed row by row — they are the actionable
+// surface; resolved ones are summarized by count. The same scan always
+// renders identically: rows follow the current findings order (deterministic
+// by scannerOrder), never map iteration.
+func markdownDiff(d *ReportDiff) string {
+	out := "\n## Diff vs baseline\n\n"
+	out += fmt.Sprintf("- **Baseline:** `%s`  \n", escapeMD(d.BaselinePath))
+	out += fmt.Sprintf("- **Baseline date:** %s\n", d.BaselineDate.Format(time.RFC3339))
+	out += "\n| Metric | Value |\n|---|---|\n"
+	out += fmt.Sprintf("| New findings | %d (%d exploitable) |\n", len(d.New), d.NewExploitable)
+	out += fmt.Sprintf("| Resolved findings | %d |\n", len(d.Resolved))
+	out += "\n### New findings\n\n"
+	if len(d.New) == 0 {
+		out += "No new findings — the measured surface did not grow since the baseline.\n"
+		return out
+	}
+	out += "| Source | Risk | Target | Description |\n|---|---|---|---|\n"
+	for _, f := range d.New {
+		out += fmt.Sprintf("| %s | %s | `%s` | %s |\n",
+			f.Source, f.Risk.String(), escapeMD(f.Target), escapeMD(f.Description))
+	}
 	return out
 }
 

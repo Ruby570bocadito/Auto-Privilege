@@ -28,12 +28,12 @@ Everything is deliberate about its honesty. Vectors it cannot verify automatical
 
 | | |
 |---|---|
-| **16 read-only scanners** | SUID/SGID, sudo rules + version, writable cron, passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS, writable PATH dirs, systemd services, kernel CVEs, credentials in history/configs, cloud metadata |
+| **18 read-only scanners** | SUID/SGID, sudo rules + version, writable cron, passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS, writable PATH dirs, systemd services, kernel CVEs, credentials in history/configs, cloud metadata, `ld.so.preload`, writable sudoers |
 | **75 GTFOBins techniques + 31 sgid** | embedded in the binary — works air-gapped; refreshable from upstream with one command (`--list-gtfo` shows the sgid section) |
 | **Safest-first auto-exploit** | techniques sorted by risk, `--risk` cap, `--one-shot` stop at first root |
 | **Two output modes** | human terminal with truecolor ramp, or `--json` for machines (`--output file` persists it, 0600); optional markdown `--report` with evidence |
 | **Rootless demo lab** | `lab/rootless_lab.sh` builds a fake-vulnerable box inside a user namespace — no Docker, no real root, nothing touches your system |
-| **Script-friendly** | `--quiet` + exit codes (`0` root, `1` no root, `2` error), `--no-color` auto when piped, `NO_COLOR` respected |
+| **Script-friendly** | `--quiet` + exit codes (`0` root, `1` no root, `2` error, `3` policy gate), `--no-color` auto when piped, `NO_COLOR` respected |
 
 ## How it works
 
@@ -83,7 +83,8 @@ Modes:
 
 Targeting:
   --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
-                            docker,container,caps,nfs,path,service,kernel,cred,all
+                            docker,container,caps,nfs,path,service,kernel,cred,
+                            preload,sudoers,all
   --risk level              max auto-exploit risk: safe|low|medium|high|danger
   --one-shot                stop after the first successful exploit
   --lhost ip                reverse-shell listener host (auto-detected)
@@ -93,6 +94,7 @@ Output:
   --json                    machine-readable report on stdout
   --output file             write the JSON report to a file (0600)
   --report file             also write a markdown evidence report
+  --baseline file           diff findings against a previous --json/--output report
   --quiet                   no output; exit code 0 = root, 1 = no root
   --no-color                disable ANSI colors (auto-off when piped)
   --verbose                 debug logging on stderr
@@ -101,12 +103,14 @@ Output:
 Misc:
   --stealth                 jitter between scanners and exploits
   --scan-timeout dur        timeout for scan-time external commands (default 5s)
+  --fail-on risk            exit 3 when exploitable findings >= risk
+                            (low|medium|high|danger) — CI hardening gate
   --rooteame path           load .ko module if root is obtained (lab only)
   --version                 print version
   -h, --help                this help
 ```
 
-Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error.
+Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error · `3` `--fail-on` policy gate tripped (the gate wins over `1`; all reports are written either way).
 
 ## Vectors covered
 
@@ -126,6 +130,8 @@ Exit codes: `0` root obtained · `1` no root · `2` usage or runtime error.
 | `service` | writable systemd units / PathChanged hijack | yes |
 | `kernel` | kernel-range CVEs: Dirty Pipe, Dirty Cow, OverlayFS, StackRot, nf_tables; PwnKit via pkexec | partial |
 | `cred` | passwords in history, configs, cloud metadata (imds, 800 ms timeout) | yes |
+| `preload` | `/etc/ld.so.preload` non-empty (loaded with euid 0 into every SUID binary) — HIGH/exploitable when writable, informational otherwise | manual |
+| `sudoers` | writable `/etc/sudoers` (append NOPASSWD rule, auto) or writable `/etc/sudoers.d` (drop-in, manual: sudo requires root-owned files) | partial |
 
 `partial` means AUTOPRIV sets the stage (version checks, rule parsing) but a human confirms the final step — the tool says so instead of faking it.
 
@@ -171,6 +177,19 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 
 **Markdown** (`--report audit.md`) — a summary table with the at-a-glance counts (findings, exploitable, auto/manual vectors, risk distribution), then per-vector sections with the command, the risk and the evidence lines, suitable for an engagement appendix.
 
+**Baseline diff** (`--baseline prev.json`) — the hardening loop, closed: snapshot a machine with `--output base.json`, fix what you can, re-scan against the snapshot and the tool classifies every finding as **new** (surface grew) or **resolved** (fix worked), keyed by source+target so reordering or rewording never fakes a change. The diff appears in the terminal, in the JSON (`"diff"` key with `new`/`resolved`/`new_exploitable`/`summary_before`) and in a `## Diff vs baseline` section of the markdown report:
+
+```bash
+$ autoprivilege --output base.json          # day 0: snapshot
+$ # ... harden the machine ...
+$ autoprivilege --baseline base.json        # day N: verify
+  ── Diff vs baseline ─────────────────────
+   new        1  (exploitable 1)
+   resolved   3
+```
+
+**CI hardening gate** (`--fail-on`) — turn the scan into a policy check: `--quiet --fail-on high` exits `3` when at least one exploitable finding sits at or above the threshold, so a pipeline (or a cron job shipping reports) fails loudly the moment the measured surface regresses.
+
 ## The rootless lab
 
 The lab is a fake compromised box built inside a **user namespace** (`unshare -r -m`): a temporary `/etc` with writable passwd/shadow/cron, a bind-mounted `/usr/bin` seeded with SUID `python3` and `find`. The SUID bits only grant the namespace's mapped root — never yours. It is the safest way to demo, test and screenshot the full scan → enumerate → root cycle without Docker or any privileged setup:
@@ -200,7 +219,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-67 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary) and the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push, plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
+82 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary), the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before), the baseline diff (new/resolved classification keyed by source+target, JSON shape without `null`s, fail-fast validation of foreign JSON files), the `--fail-on` gate (threshold parsing, exploitable-only counting) and the new preload/sudoers scanners (entry counting, writable-vs-informational honesty, idempotent sudoers write with newline compensation). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push, plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
 
 ## License
 

@@ -49,6 +49,14 @@ func main() {
 		}
 	}
 
+	// Baseline diff: computed once here so the terminal block, the JSON
+	// export and the markdown report all share the same numbers.
+	if p.Baseline != nil {
+		p.Diff = diffReports(p.Baseline, p.Findings)
+		p.Diff.BaselinePath = p.Opts.Baseline
+		printDiffSummary(p)
+	}
+
 	// FASE 3: Exploit (or show the plan)
 	// --dry-run shows the execution plan on its own: the usage text and
 	// both READMEs promise "scan + enumerate, show what would run", but
@@ -109,9 +117,26 @@ func main() {
 	printSummary(p, time.Since(p.Started))
 
 	// Exit codes (documented): 0 = root or scan-only run, 1 = exploit ran
-	// without root, 2 = usage error.
+	// without root, 2 = usage error, 3 = --fail-on policy gate tripped.
+	// The gate is evaluated last and wins: a CI job must fail (3) even
+	// when an exploit attempt also failed (1) — all reports above are
+	// already written either way.
+	exitCode := 0
 	if p.Opts.Exploit && !p.Opts.DryRun && !p.Rooted && !isRoot() {
-		os.Exit(1)
+		exitCode = 1
+	}
+	if n := policyGateCount(p); n > 0 {
+		exitCode = 3
+		msg := fmt.Sprintf("  [!] policy gate: %d exploitable finding(s) at/above %s — exit 3\n",
+			n, p.Opts.FailOnRisk.String())
+		if p.Opts.JSON || p.Opts.Quiet {
+			fmt.Fprint(os.Stderr, msg)
+		} else {
+			fmt.Print(msg)
+		}
+	}
+	if exitCode != 0 {
+		os.Exit(exitCode)
 	}
 }
 
@@ -119,10 +144,11 @@ func run() *AutoPrivilege {
 	var opts Options
 	var risk string
 	var showVersion bool
+	var baseline *jsonReport
 
 	flag.BoolVar(&opts.Exploit, "exploit", false, "Auto-exploit found vectors")
 	flag.StringVar(&risk, "risk", "safe", "Max risk: safe, low, medium, high, danger")
-	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred")
+	flag.StringVar(&opts.Vector, "vector", "", "Comma-separated vectors: suid,sgid,sudo,cron,passwd,shadow,docker,container,caps,nfs,path,service,kernel,cred,preload,sudoers")
 	flag.BoolVar(&opts.JSON, "json", false, "JSON output")
 	flag.BoolVar(&opts.Quiet, "quiet", false, "Quiet mode (exit code only)")
 	flag.StringVar(&opts.Rooteame, "rooteame", "", "Path to rootkit.ko to load on root (lab only)")
@@ -138,6 +164,8 @@ func run() *AutoPrivilege {
 	flag.BoolVar(&opts.ListGTFO, "list-gtfo", false, "Print the embedded GTFOBins database and exit")
 	flag.StringVar(&opts.Report, "report", "", "Write a markdown report to this path")
 	flag.StringVar(&opts.Output, "output", "", "Write the JSON report to this file (0600)")
+	flag.StringVar(&opts.Baseline, "baseline", "", "Diff findings against a previous --json/--output report")
+	flag.StringVar(&opts.FailOn, "fail-on", "", "Exit 3 if any exploitable finding at/above this risk: low, medium, high, danger")
 	flag.DurationVar(&opts.ScanTimeout, "scan-timeout", 5*time.Second, "Timeout for external commands during scan (e.g. 10s, 2m)")
 	flag.BoolVar(&showVersion, "version", false, "Print version and exit")
 
@@ -150,6 +178,27 @@ func run() *AutoPrivilege {
 			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
 			os.Exit(2)
 		}
+	}
+
+	// Fail fast on a bad --fail-on / unreadable --baseline too: both are
+	// usage errors, and a CI gate must never scan for minutes before
+	// discovering its configuration was wrong.
+	if opts.FailOn != "" {
+		lvl, enabled, err := parseFailOn(opts.FailOn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %v\n", err)
+			os.Exit(2)
+		}
+		opts.FailOnRisk = lvl
+		opts.FailOnEnabled = enabled
+	}
+	if opts.Baseline != "" {
+		b, err := loadBaseline(opts.Baseline)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] baseline: %v\n", err)
+			os.Exit(2)
+		}
+		baseline = b
 	}
 
 	// Colors: auto-disable when piped, when told to, or when NO_COLOR is set.
@@ -183,7 +232,7 @@ func run() *AutoPrivilege {
 		opts.LHost = detectLocalIP()
 	}
 
-	p := &AutoPrivilege{Opts: opts, Started: time.Now()}
+	p := &AutoPrivilege{Opts: opts, Baseline: baseline, Started: time.Now()}
 
 	printBanner(opts)
 

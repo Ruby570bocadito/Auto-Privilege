@@ -11,7 +11,7 @@ import (
 	"unsafe"
 )
 
-const Version = "1.5.0"
+const Version = "1.6.0"
 
 type RiskLevel int
 
@@ -101,6 +101,12 @@ type Options struct {
 	Report      string
 	Output      string
 	ScanTimeout time.Duration
+	Baseline    string
+	FailOn      string
+	// FailOnRisk/FailOnEnabled are filled by run() from FailOn; tests and
+	// library use may set them directly.
+	FailOnRisk    RiskLevel
+	FailOnEnabled bool
 }
 
 // scanCmdTimeout returns the timeout applied to external commands run by the
@@ -121,6 +127,10 @@ type AutoPrivilege struct {
 	Rooted      bool
 	LastSuccess bool
 	Started     time.Time
+	// Baseline holds the parsed previous report when --baseline was given;
+	// Diff is its computed comparison (nil without --baseline).
+	Baseline *jsonReport
+	Diff     *ReportDiff
 }
 
 // ================================================================

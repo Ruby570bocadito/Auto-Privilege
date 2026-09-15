@@ -66,7 +66,8 @@ func usage() {
 
   Targeting:
     --vector list             comma-separated: suid,sgid,sudo,cron,passwd,shadow,
-                              docker,container,caps,nfs,path,service,kernel,cred,all
+                              docker,container,caps,nfs,path,service,kernel,cred,
+                              preload,sudoers,all
     --risk level              max auto-exploit risk: safe|low|medium|high|danger
     --one-shot                stop after the first successful exploit
     --lhost ip                reverse-shell listener host (auto-detected)
@@ -76,6 +77,7 @@ func usage() {
     --json                    machine-readable report on stdout
     --output file             write the JSON report to a file (0600)
     --report file             also write a markdown evidence report
+    --baseline file           diff findings against a previous --json/--output report
     --quiet                   no output; exit code 0 = root, 1 = no root
     --no-color                disable ANSI colors (auto-off when piped)
     --verbose                 debug logging on stderr
@@ -84,6 +86,8 @@ func usage() {
   Misc:
     --stealth                 jitter between scanners and exploits
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
+    --fail-on risk            exit 3 when exploitable findings >= risk
+                              (low|medium|high|danger) — CI hardening gate
     --rooteame path           load .ko module if root is obtained (lab only)
     --version                 print version
     -h, --help                this help
@@ -94,6 +98,9 @@ func usage() {
     autoprivilege --vector=suid,sudo       focus two specific vectors
     autoprivilege --json > report.json     CI-friendly output
     autoprivilege --report audit.md        markdown evidence report
+    autoprivilege --output base.json       snapshot, then harden, then:
+    autoprivilege --baseline base.json     show new/resolved findings
+    autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high
     lab/rootless_lab.sh --exploit          safe rootless demo lab
 `
 	fmt.Fprintln(os.Stderr, colorize(out, AnsiGrey))
@@ -120,6 +127,25 @@ func printDryRunPlan(p *AutoPrivilege) {
 	}
 }
 
+// printDiffSummary renders the terminal block of the baseline comparison:
+// counts first, then every NEW finding with the same risk tags as the main
+// findings list (reusing p.Print keeps colors/quiet behavior consistent).
+// Resolved findings are counted, not listed — the payoff is a number, the
+// action is in the news.
+func printDiffSummary(p *AutoPrivilege) {
+	if p.Opts.JSON || p.Opts.Quiet || p.Diff == nil {
+		return
+	}
+	fmt.Println(colorize("  ── Diff vs baseline ─────────────────────", AnsiCyan))
+	fmt.Printf("   %-10s %d  (%s %d)\n", "new", len(p.Diff.New), "exploitable", p.Diff.NewExploitable)
+	fmt.Printf("   %-10s %d\n", "resolved", len(p.Diff.Resolved))
+	for _, f := range p.Diff.New {
+		p.Print(f)
+	}
+	fmt.Println()
+}
+
+// printTopVectors shows the strongest manual options instead of nothing.
 func printTopVectors(p *AutoPrivilege, n int) {
 	sorted := sortedVectors(p.Vectors)
 	count := 0

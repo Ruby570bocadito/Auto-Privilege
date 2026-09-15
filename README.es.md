@@ -28,12 +28,12 @@ Todo en ella es deliberadamente honesto. Los vectores que no puede verificar aut
 
 | | |
 |---|---|
-| **16 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible, inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS, directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud |
+| **18 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible, inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS, directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud, `ld.so.preload`, sudoers escribible |
 | **75 técnicas GTFOBins + 31 sgid** | embebidas en el binario — funciona air-gapped; actualizable desde upstream con un comando (`--list-gtfo` muestra la sección sgid) |
 | **Auto-explotación de más seguro a más agresivo** | técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root |
 | **Dos modos de salida** | terminal humano con rampa de color, o `--json` para máquinas (`--output fichero` lo persiste, 0600); `--report` markdown opcional con evidencias |
 | **Laboratorio rootless** | `lab/rootless_lab.sh` monta una caja fake-vulnerable dentro de un user namespace — sin Docker, sin root real, no toca tu sistema |
-| **Amigable para scripts** | `--quiet` + códigos de salida (`0` root, `1` sin root, `2` error), `--no-color` automático al pipear, `NO_COLOR` respetado |
+| **Amigable para scripts** | `--quiet` + códigos de salida (`0` root, `1` sin root, `2` error, `3` puerta de política), `--no-color` automático al pipear, `NO_COLOR` respetado |
 
 ## Cómo funciona
 
@@ -83,7 +83,8 @@ Modos:
 
 Filtrado:
   --vector lista            separada por comas: suid,sgid,sudo,cron,passwd,shadow,
-                            docker,container,caps,nfs,path,service,kernel,cred,all
+                            docker,container,caps,nfs,path,service,kernel,cred,
+                            preload,sudoers,all
   --risk nivel              riesgo máximo de auto-explotación: safe|low|medium|high|danger
   --one-shot                parar tras el primer exploit exitoso
   --lhost ip                host del listener de reverse-shell (autodetectado)
@@ -93,6 +94,7 @@ Salida:
   --json                    informe legible por máquina en stdout
   --output fichero          escribe el informe JSON a un fichero (0600)
   --report fichero          escribe además un informe markdown con evidencias
+  --baseline fichero        compara los hallazgos contra un informe previo --json/--output
   --quiet                   sin salida; código 0 = root, 1 = sin root
   --no-color                desactiva colores ANSI (auto al pipear)
   --verbose                 logging de debug en stderr
@@ -101,12 +103,14 @@ Salida:
 Varios:
   --stealth                 jitter entre escáneres y exploits
   --scan-timeout dur        timeout para comandos externos del escaneo (por defecto 5s)
+  --fail-on riesgo          código 3 si hay hallazgos explotables >= riesgo
+                            (low|medium|high|danger) — puerta de endurecimiento CI
   --rooteame ruta           carga un módulo .ko al conseguir root (solo lab)
   --version                 imprime versión
   -h, --help                esta ayuda
 ```
 
-Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ejecución.
+Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ejecución · `3` puerta de política `--fail-on` activada (la puerta gana sobre `1`; todos los informes se escriben igualmente).
 
 ## Vectores cubiertos
 
@@ -126,6 +130,8 @@ Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ej
 | `service` | unidades systemd escribibles / secuestro PathChanged | sí |
 | `kernel` | CVEs por rango de kernel: Dirty Pipe, Dirty Cow, OverlayFS, StackRot, nf_tables; PwnKit vía pkexec | parcial |
 | `cred` | contraseñas en history, configs, metadata cloud (imds, timeout 800 ms) | sí |
+| `preload` | `/etc/ld.so.preload` no vacío (se carga con euid 0 en cada binario SUID) — HIGH/explotable si es escribible, informativo si no | manual |
+| `sudoers` | `/etc/sudoers` escribible (añadir regla NOPASSWD, auto) o `/etc/sudoers.d` escribible (drop-in, manual: sudo exige ficheros de root) | parcial |
 
 `parcial` significa que AUTOPRIV prepara el terreno (checks de versión, parseo de reglas) pero un humano confirma el paso final — la herramienta lo dice en vez de fingirlo.
 
@@ -171,6 +177,19 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 
 **Markdown** (`--report audit.md`) — una tabla resumen con los totales de un vistazo (hallazgos, explotables, vectores auto/manual, distribución de riesgos) y después secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
 
+**Diff contra baseline** (`--baseline prev.json`) — el ciclo de endurecimiento, cerrado: haz una instantánea con `--output base.json`, corrige lo que puedas, vuelve a escanear contra la instantánea y la herramienta clasifica cada hallazgo como **nuevo** (la superficie creció) o **resuelto** (el arreglo funcionó), con clave fuente+objetivo para que un reordenado o un cambio de redacción nunca finja un cambio. El diff aparece en el terminal, en el JSON (clave `"diff"` con `new`/`resolved`/`new_exploitable`/`summary_before`) y en una sección `## Diff vs baseline` del reporte markdown:
+
+```bash
+$ autoprivilege --output base.json          # día 0: instantánea
+$ # ... endurecer la máquina ...
+$ autoprivilege --baseline base.json        # día N: verificar
+  ── Diff vs baseline ─────────────────────
+   new        1  (exploitable 1)
+   resolved   3
+```
+
+**Puerta de endurecimiento CI** (`--fail-on`) — convierte el escaneo en una comprobación de política: `--quiet --fail-on high` sale con código `3` cuando existe al menos un hallazgo explotable en o por encima del umbral, así un pipeline (o un cron que envía informes) falla ruidosamente en cuanto la superficie medida regresa.
+
 ## El laboratorio rootless
 
 El lab es una caja fake comprometida construida dentro de un **user namespace** (`unshare -r -m`): un `/etc` temporal con passwd/shadow/cron escribibles, un `/usr/bin` bindeado con `python3` y `find` SUID. Los bits SUID solo dan el root mapeado del namespace — nunca el tuyo. Es la forma más segura de demostrar, testear y capturar el ciclo completo escaneo → enumeración → root sin Docker ni permisos especiales:
@@ -200,7 +219,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-67 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON) y el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
+82 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON), el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes), el diff contra baseline (clasificación nuevo/resuelto con clave fuente+objetivo, forma JSON sin `null`, validación fail-fast de JSON ajenos), la puerta `--fail-on` (parseo del umbral, recuento solo de explotables) y los scanners nuevos de preload/sudoers (recuento de entradas, honestidad escribible-vs-informativo, escritura sudoers idempotente con compensación de salto de línea). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
 
 ## Licencia
 
