@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1364,5 +1365,150 @@ func TestGTFOUpdateJSONKeepsSgidTotal(t *testing.T) {
 	}
 	if probe["entries_sgid"].(float64) != 31 {
 		t.Errorf("entries_sgid must carry the accumulated total, got %v", probe["entries_sgid"])
+	}
+}
+
+func TestMarkdownReportIncludesSummary(t *testing.T) {
+	p := &AutoPrivilege{
+		Opts:    Options{Report: "x"},
+		Started: time.Now(),
+		Findings: []Finding{
+			{Source: "SUID", Target: "/usr/bin/python3", Description: "d1", Risk: RiskHigh, Exploitable: true},
+			{Source: "FILE", Target: "/etc/passwd", Description: "d2", Risk: RiskDanger, Exploitable: true},
+			{Source: "CRED", Target: "/home/x/.bash_history", Description: "d3", Risk: RiskLow, Exploitable: false},
+		},
+		Vectors: []Vector{
+			{Name: "auto one", Category: "suid", Target: "t", Command: "c", Exploit: func() *ExploitResult { return nil }},
+			{Name: "manual one", Category: "sgid", Target: "t", Command: "c"},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "report.md")
+	if err := p.WriteMarkdownReport(path); err != nil {
+		t.Fatalf("WriteMarkdownReport: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	if !strings.Contains(out, "## Summary") {
+		t.Error("markdown report must carry a Summary section (self-sufficient appendix)")
+	}
+	if !strings.Contains(out, "| Findings | 3 (2 exploitable) |") {
+		t.Error("summary must mirror the scan counts")
+	}
+	if !strings.Contains(out, "| Vectors | 2 (1 auto · 1 manual) |") {
+		t.Error("summary must split auto/manual vectors")
+	}
+	if !strings.Contains(out, "DANGER 1") || !strings.Contains(out, "HIGH 1") || !strings.Contains(out, "LOW 1") {
+		t.Error("summary must list every risk bucket with its count")
+	}
+}
+
+func TestMarkdownSummaryEmptyRisks(t *testing.T) {
+	out := markdownSummary(jsonSummary{Risks: map[string]int{}})
+	if !strings.Contains(out, "| Risks | — |") {
+		t.Error("an empty risk map must render an em dash, never an empty cell or null")
+	}
+}
+
+func TestConfigCandidateFilesHandlesDirectories(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	withPsk := write("wifi-home.nmconnection", "[wifi-security]\npsk=secret123\n")
+	noPsk := write("empty.conf", "nothing here\n")
+	write("notes.txt", "no credentials here")
+	sub := filepath.Join(dir, "nested")
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join("nested", "deep.conf"), "psk=deep")
+
+	files := configCandidateFiles(dir)
+	if len(files) != 3 {
+		t.Fatalf("directory must resolve to its 3 regular top-level files, got %v", files)
+	}
+	if !sort.StringsAreSorted(files) {
+		t.Errorf("files must come back sorted for deterministic scans, got %v", files)
+	}
+
+	// The old bug: directories returned NOTHING, so the NetworkManager psk=
+	// check could never fire. A directory with a psk= file must now yield it.
+	got, err := os.ReadFile(files[0])
+	_ = got
+	_ = err
+	p := &AutoPrivilege{Opts: Options{}}
+	for _, f := range files {
+		scanConfigFile(p, f, "psk=", "WiFi passwords in NetworkManager")
+	}
+	if len(p.Findings) != 1 {
+		t.Fatalf("exactly one psk= file must be reported, got %d findings", len(p.Findings))
+	}
+	if p.Findings[0].Target != withPsk {
+		t.Errorf("wrong file reported: %s", p.Findings[0].Target)
+	}
+	if p.Findings[0].Source != "CRED" || !p.Findings[0].Exploitable {
+		t.Errorf("reported finding must be an exploitable CRED: %+v", p.Findings[0])
+	}
+
+	// Subdirectories are never descended into (bounded scope).
+	if _, err := os.Stat(filepath.Join(sub, "deep.conf")); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range p.Findings {
+		if strings.Contains(f.Target, "nested") {
+			t.Error("subdirectory contents must not be scanned (top-level scope)")
+		}
+	}
+	_ = noPsk
+}
+
+func TestConfigCandidateFilesSingleFileAndMissing(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "my.cnf")
+	if err := os.WriteFile(file, []byte("password=x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := configCandidateFiles(file); len(got) != 1 || got[0] != file {
+		t.Errorf("a plain file must resolve to itself, got %v", got)
+	}
+	if got := configCandidateFiles(filepath.Join(dir, "missing")); got != nil {
+		t.Errorf("missing paths must resolve to nothing, got %v", got)
+	}
+}
+
+func TestScanConfigFilePatternGate(t *testing.T) {
+	dir := t.TempDir()
+	match := filepath.Join(dir, "redis.conf")
+	if err := os.WriteFile(match, []byte("requirepass s3cret\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plain := filepath.Join(dir, "plain.conf")
+	if err := os.WriteFile(plain, []byte("no secrets here\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &AutoPrivilege{Opts: Options{}}
+	scanConfigFile(p, match, "requirepass", "Redis password configuration")
+	if len(p.Findings) != 1 {
+		t.Fatalf("pattern present: file must be reported, got %d findings", len(p.Findings))
+	}
+	scanConfigFile(p, plain, "requirepass", "Redis password configuration")
+	if len(p.Findings) != 1 {
+		t.Error("pattern absent: file must NOT be reported (no noise)")
+	}
+	scanConfigFile(p, plain, "", "history file")
+	if len(p.Findings) != 2 {
+		t.Error("empty pattern: history files report on presence alone")
+	}
+	scanConfigFile(p, filepath.Join(dir, "missing"), "requirepass", "d")
+	if len(p.Findings) != 2 {
+		t.Error("unreadable/missing files must stay silent")
 	}
 }

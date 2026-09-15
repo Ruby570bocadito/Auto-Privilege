@@ -10,7 +10,6 @@ Un binario Go. Cero dependencias. Resultados honestos.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-62%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="Demo de AUTOPRIV: escaneo, plan dry-run, escalada SUID hasta uid=0 en el laboratorio rootless" width="720"></p>
@@ -170,7 +169,7 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 }
 ```
 
-**Markdown** (`--report audit.md`) — secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
+**Markdown** (`--report audit.md`) — una tabla resumen con los totales de un vistazo (hallazgos, explotables, vectores auto/manual, distribución de riesgos) y después secciones por vector con el comando, el riesgo y las líneas de evidencia, ideal como apéndice de un engagement.
 
 ## El laboratorio rootless
 
@@ -181,7 +180,10 @@ lab/rootless_lab.sh                             # solo escaneo
 lab/rootless_lab.sh --exploit --dry-run         # muestra el plan
 lab/rootless_lab.sh --exploit --risk=danger     # escalada completa hasta uid=0
 lab/rootless_lab.sh --shell                     # shell interactiva del namespace
+lab/rootless_lab.sh --seeds                     # lista las vulnerabilidades sembradas
 ```
+
+Lo que el lab siembra (ver `--seeds`): `python3` y `find` SUID en `/usr/bin`, un cron job de root escribible en `/etc/cron.d/backup`, `/etc/passwd` escribible, una `/etc/shadow` propia (legible y escribible), la unidad systemd `vuln.service` escribible y un directorio del PATH world-writable como cebo de plantado de binarios. Todo es FALSO y vive solo dentro del namespace.
 
 ## Testing con Docker
 
@@ -198,7 +200,7 @@ AUTOPRIV es solo para **trabajo de seguridad autorizado**: tus propias máquinas
 
 ## Tests y CI
 
-62 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins y el fichero JSON de `--output` (forma y permisos 0600). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push.
+67 tests unitarios cubren los puntos delicados a propósito: el arte del banner se verifica decodificándolo rune a rune (se acabó el ASCII art mal escrito), el parseo de CSV de vectores, la ordenación de riesgos, los rangos de CVEs de kernel, los rangos de versiones de sudo, los timeouts de explotación, las regresiones de quoting de shell, los guards de spool, los formatos de hash y el escape de markdown, además del walk recursivo SUID/SGID (recursión, salto de symlinks, deduplicación, límite de profundidad y las raíces lib64), la clasificación honesta de SGID con procedencia de técnica declarada, el timeout configurable de escaneo, las heurísticas de runtimes de contenedores (evidencia de cgroups, sockets objetivo, vectores de breakout, detección de privileged/namespace de PID), la tabla estructural de simetría de selección de vectores (cada nombre de `--vector` produce solo su propia categoría), la captura/persistencia de técnicas sgid de GTFOBins, el fichero JSON de `--output` (forma y permisos 0600), la sección de resumen del reporte markdown (totales que espejan el summary del JSON) y el barrido de credenciales en DIRECTORIOS de configuración (el `psk=` de NetworkManager y los árboles por versión de PostgreSQL estaban muertos en silencio antes). La CI ejecuta build, vet, gofmt y la suite completa con `-count=1` en cada push, más un job `lab-smoke` que corre el lab rootless real y comprueba que el stdout de `--json --quiet` sigue siendo un único documento JSON limpio.
 
 ## Licencia
 

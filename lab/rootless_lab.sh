@@ -12,12 +12,31 @@
 #   lab/rootless_lab.sh                     # scan + enumerate (read-only)
 #   lab/rootless_lab.sh --exploit --risk=medium
 #   lab/rootless_lab.sh --json
+#   lab/rootless_lab.sh --seeds             # list the staged vulnerabilities
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BIN=/tmp/autoprivilege
+
+# --seeds: print exactly what the lab stages (the bait list below mirrors the
+# cp/chmod lines 1:1) and exit before building anything — the list is also
+# linked from the README so the demo's fake vulnerabilities are documented,
+# not folklore. Works even on hosts without unshare (pure documentation).
+if [ "${1:-}" = "--seeds" ]; then
+    cat <<'EOF'
+[lab] staged vulnerabilities (all FAKE, inside the namespace only):
+  1. /usr/bin seeded with SUID python3 + find          -> GTFOBins shell techniques
+  2. /etc/cron.d/backup: writable root cron job        -> cron injection
+  3. /etc/passwd: writable copy                        -> root user injection
+  4. /etc/shadow: owned copy (readable + writable)     -> root hash extraction
+  5. /etc/systemd/system/vuln.service: writable unit   -> systemd hijack
+  6. /usr/local/bin/writable: world-writable PATH dir  -> binary planting bait
+The SUID bits only grant the namespace's mapped root — never your real user.
+EOF
+    exit 0
+fi
 
 command -v unshare >/dev/null || { echo "unshare not available"; exit 1; }
 

@@ -10,7 +10,6 @@ One Go binary. Zero dependencies. Honest results.</p>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
   <img src="https://img.shields.io/github/v/tag/Ruby570bocadito/Auto-Privilege?label=release&sort=semver" alt="Release">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
-  <img src="https://img.shields.io/badge/tests-62%20passing-brightgreen" alt="Tests">
 </p>
 
 <p align="center"><img src="docs/images/demo-lab.gif" alt="AUTOPRIV demo: scan, dry-run plan, SUID escalation to uid=0 in the rootless lab" width="720"></p>
@@ -170,7 +169,7 @@ $ lab/rootless_lab.sh --json --quiet | jq '.summary'
 }
 ```
 
-**Markdown** (`--report audit.md`) — per-vector sections with the command, the risk and the evidence lines, suitable for an engagement appendix.
+**Markdown** (`--report audit.md`) — a summary table with the at-a-glance counts (findings, exploitable, auto/manual vectors, risk distribution), then per-vector sections with the command, the risk and the evidence lines, suitable for an engagement appendix.
 
 ## The rootless lab
 
@@ -181,7 +180,10 @@ lab/rootless_lab.sh                             # scan only
 lab/rootless_lab.sh --exploit --dry-run         # show the plan
 lab/rootless_lab.sh --exploit --risk=danger     # full climb to uid=0
 lab/rootless_lab.sh --shell                     # interactive namespace shell
+lab/rootless_lab.sh --seeds                     # list the staged vulnerabilities
 ```
+
+What the lab stages (see `--seeds`): SUID `python3` + `find` in `/usr/bin`, a writable root cron job in `/etc/cron.d/backup`, writable `/etc/passwd`, an owned (readable + writable) `/etc/shadow`, a writable `vuln.service` systemd unit, and a world-writable PATH directory as binary-planting bait. Everything is FAKE and lives only inside the namespace.
 
 ## Docker testing
 
@@ -198,7 +200,7 @@ AUTOPRIV is for **authorized security work only**: your own machines, labs, CTFs
 
 ## Testing and CI
 
-62 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence and the `--output` JSON file (shape and 0600 perms). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push.
+67 unit tests cover the tricky parts on purpose: banner art is decode-verified rune by rune (no more misspelled ASCII art), vector CSV parsing, risk sorting, kernel CVE ranges, sudo version ranges, exploit timeouts, shell-quoting regressions, spool guards, hash formats and markdown escaping, plus the recursive SUID/SGID walk (recursion, symlink skip, dedup, depth guard and the lib64 roots), honest SGID classification with declared technique provenance, the configurable scan timeout, container-runtime heuristics (cgroup evidence, socket targeting, breakout vectors, privileged/PID-namespace detection), the structural vector-selection symmetry table (every `--vector` name yields only its own category), GTFOBins sgid capture/persistence, the `--output` JSON file (shape and 0600 perms), the markdown report's summary section (counts mirroring the JSON summary) and the credential sweep of config DIRECTORIES (NetworkManager `psk=` / per-version PostgreSQL trees were silently dead before). CI runs build, vet, gofmt and the full test suite with `-count=1` on every push, plus a `lab-smoke` job that runs the real rootless lab and asserts `--json --quiet` stdout stays a single clean JSON document.
 
 ## License
 

@@ -22,3 +22,25 @@ jobs:
         run: go vet ./...
       - name: Gofmt
         run: test -z "$(gofmt -l .)"
+
+  # The lab's --json --quiet contract (nothing but one JSON document on
+  # stdout; lab progress goes to stderr) is load-bearing for the README's
+  # `lab/rootless_lab.sh --json --quiet | jq '.summary'` promise. This smoke
+  # test exercises the REAL lab inside a user namespace on every push, so a
+  # future echo that leaks to stdout fails CI instead of silently breaking
+  # every jq-based consumer (round-6 security review recommendation).
+  lab-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Lab smoke test — --json --quiet stdout contract
+        run: |
+          OUT=$(lab/rootless_lab.sh --json --quiet 2>/dev/null)
+          echo "$OUT" | jq -e '.tool == "Auto-Privilege"' > /dev/null
+          echo "$OUT" | jq -e '.summary.findings > 0' > /dev/null
+          echo "$OUT" | jq -e '.summary.vectors > 0' > /dev/null
+          echo "lab stdout is a clean JSON report: OK"

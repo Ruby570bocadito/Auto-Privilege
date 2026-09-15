@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1048,24 +1049,67 @@ func scanConfigPasswords(p *AutoPrivilege) {
 	}
 
 	for _, cfg := range configPaths {
-		info, err := os.Stat(cfg.path)
-		if err != nil || info.IsDir() {
-			// Directories like /etc/postgresql only matter file-by-file;
-			// flagging their existence was pure noise.
-			continue
+		for _, file := range configCandidateFiles(cfg.path) {
+			scanConfigFile(p, file, cfg.pattern, cfg.desc)
 		}
-		if !isReadable(cfg.path) {
-			continue
-		}
-		data, err := os.ReadFile(cfg.path)
-		if err != nil {
-			continue
-		}
-		if cfg.pattern != "" && !strings.Contains(string(data), cfg.pattern) {
-			continue // only report when the credential pattern is really there
-		}
-		addFinding(p, "CRED", cfg.path, cfg.desc, RiskMedium, true)
 	}
+}
+
+// configCandidateFiles resolves one configured location into the concrete
+// files to audit: the file itself, or — when the location is a directory —
+// its regular top-level files (sorted for a deterministic order). The old
+// code skipped every directory, which silently killed the NetworkManager
+// psk= check (system-connections is ALWAYS a directory where NetworkManager
+// exists — the finding was structurally unreachable) and left the
+// /etc/postgresql entry dead despite its comment promising per-file checks.
+// Scope stays bounded: top-level files only, subdirectories and symlinks are
+// not descended into (per-version trees like /etc/postgresql/15/main are
+// deliberately out — /etc walks belong to a dedicated feature, not a
+// credential sweep).
+func configCandidateFiles(path string) []string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil
+	}
+	if !info.IsDir() {
+		return []string{path}
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		full := filepath.Join(path, e.Name())
+		fi, err := os.Lstat(full)
+		if err != nil || !fi.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, full)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// scanConfigFile reports one credential-bearing config file. History files
+// (empty pattern) report on presence alone; patterned entries only report
+// when the credential pattern is really inside the file. Permission-denied
+// (the common non-root case) stays silent — honest absence of evidence.
+func scanConfigFile(p *AutoPrivilege, path, pattern, desc string) {
+	if !isReadable(path) {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if pattern != "" && !strings.Contains(string(data), pattern) {
+		return
+	}
+	addFinding(p, "CRED", path, desc, RiskMedium, true)
 }
 
 func scanHistoryFiles(p *AutoPrivilege) {

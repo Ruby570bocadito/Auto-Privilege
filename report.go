@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -120,6 +122,8 @@ func (p *AutoPrivilege) WriteMarkdownReport(path string) error {
 	out += fmt.Sprintf("- **Date:** %s\n", rep.Timestamp.Format(time.RFC3339))
 	out += fmt.Sprintf("- **Duration:** %d ms\n", rep.DurationMS)
 	out += fmt.Sprintf("- **Root obtained:** %v\n", rooted)
+	out += markdownSummary(rep.Summary)
+
 	out += "\n## Findings\n\n"
 	out += "| Source | Risk | Target | Description |\n|---|---|---|---|\n"
 	for _, f := range rep.Findings {
@@ -142,6 +146,36 @@ func (p *AutoPrivilege) WriteMarkdownReport(path string) error {
 	}
 
 	return os.WriteFile(path, []byte(out), 0600)
+}
+
+// markdownSummary renders the at-a-glance counts block of the markdown
+// report, mirroring the "summary" object the --json output carries: an
+// engagement appendix printed with --report is self-sufficient (totals at a
+// glance) instead of forcing the operator to re-run with --json or count
+// table rows by hand. Risk buckets are sorted alphabetically so the same
+// scan always renders identically.
+func markdownSummary(s jsonSummary) string {
+	keys := make([]string, 0, len(s.Risks))
+	for k := range s.Risks {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	risks := make([]string, 0, len(keys))
+	for _, k := range keys {
+		risks = append(risks, fmt.Sprintf("%s %d", k, s.Risks[k]))
+	}
+	riskLine := "—"
+	if len(risks) > 0 {
+		riskLine = strings.Join(risks, " · ")
+	}
+
+	out := "\n## Summary\n\n"
+	out += "| Metric | Value |\n|---|---|\n"
+	out += fmt.Sprintf("| Findings | %d (%d exploitable) |\n", s.Findings, s.Exploitable)
+	out += fmt.Sprintf("| Vectors | %d (%d auto · %d manual) |\n", s.Vectors, s.Auto, s.Manual)
+	out += fmt.Sprintf("| Risks | %s |\n", riskLine)
+	out += fmt.Sprintf("| Root obtained | %v |\n", s.Rooted)
+	return out
 }
 
 // escapeMD keeps pipes and backticks from breaking the markdown tables.
