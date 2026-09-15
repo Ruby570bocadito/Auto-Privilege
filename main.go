@@ -358,6 +358,20 @@ func run() *AutoPrivilege {
 		os.Exit(2)
 	}
 
+	// Report output directories are created (0700) BEFORE the scan: a
+	// missing parent is a two-second fix now, and a fatal surprise
+	// after a full scan later. Fail-fast, same contract as the rest of
+	// the flag validation.
+	for _, out := range []struct{ flag, path string }{
+		{"--output", opts.Output}, {"--report", opts.Report},
+		{"--html", opts.HTML}, {"--sarif", opts.Sarif},
+	} {
+		if err := ensureOutputDir(out.path); err != nil {
+			fmt.Fprintf(os.Stderr, "  [-] %s: %v\n", out.flag, err)
+			os.Exit(2)
+		}
+	}
+
 	// Colors: auto-disable when piped, when told to, or when NO_COLOR is set.
 	setColorMode(isTerminal(os.Stdout) && !opts.NoColor && os.Getenv("NO_COLOR") == "")
 

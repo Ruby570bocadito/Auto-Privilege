@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -132,6 +133,35 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// ensureOutputDir creates the parent directory of a report path (0700) so
+// `--html out/report.html` does not die at write time because out/ was
+// never created — a failure AFTER a full scan is the worst moment to learn
+// the directory was missing. Called fail-fast in run() for every report
+// path, before any scan work. The 0700 mode keeps the created directory as
+// private as the 0600 reports that land inside it; an existing directory is
+// left untouched (MkdirAll is a no-op on existing dirs, regardless of mode
+// — we do not chmod other people's directories behind their back).
+// A non-directory file in the way is an error, not a silent overwrite.
+func ensureOutputDir(path string) error {
+	if path == "" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	if fi, err := os.Stat(dir); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", dir)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	return nil
 }
 
 // WriteJSONFile saves the exact document --json prints, without depending on
