@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,7 +42,9 @@ func scanAll(p *AutoPrivilege) {
 	// its jitter exists precisely to pace host-visible probes.
 	if !p.Opts.Parallel || p.Opts.Stealth {
 		for _, scanner := range scannerOrder {
+			start := time.Now()
 			scanner(p)
+			logScanDone(scannerName(scanner), time.Since(start), p.Opts)
 			if p.Opts.Stealth {
 				time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
 			}
@@ -48,21 +52,35 @@ func scanAll(p *AutoPrivilege) {
 		return
 	}
 
+	names := make([]string, len(scannerOrder))
+	for i, scanner := range scannerOrder {
+		names[i] = scannerName(scanner)
+	}
 	perScanner := make([][]Finding, len(scannerOrder))
 	var wg sync.WaitGroup
 	for i, scanner := range scannerOrder {
 		wg.Add(1)
-		go func(idx int, fn func(*AutoPrivilege)) {
+		go func(idx int, fn func(*AutoPrivilege), name string) {
 			defer wg.Done()
+			start := time.Now()
 			lp := &AutoPrivilege{Opts: p.Opts, Started: p.Started}
 			fn(lp)
 			perScanner[idx] = lp.Findings
-		}(i, scanner)
+			logScanDone(name, time.Since(start), p.Opts)
+		}(i, scanner, names[i])
 	}
 	wg.Wait()
 	for _, findings := range perScanner {
 		p.Findings = append(p.Findings, findings...)
 	}
+}
+
+// scannerName recovers a scanner's identity for the --verbose timing log:
+// the function's Go name (scanSudo → "scanSudo"). Runtime.FuncForPC is the
+// only honest source — a parallel names slice would drift from scannerOrder
+// the first time someone reorders it and nobody would notice.
+func scannerName(fn func(*AutoPrivilege)) string {
+	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }
 
 func addFinding(p *AutoPrivilege, source, target, desc string, risk RiskLevel, exploitable bool) {

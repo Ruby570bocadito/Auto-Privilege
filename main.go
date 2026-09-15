@@ -141,27 +141,46 @@ func main() {
 	printSummary(p, time.Since(p.Started))
 
 	// Exit codes (documented): 0 = root or scan-only run, 1 = exploit ran
-	// without root, 2 = usage error, 3 = --fail-on policy gate tripped.
-	// The gate is evaluated last and wins: a CI job must fail (3) even
-	// when an exploit attempt also failed (1) — all reports above are
-	// already written either way.
-	exitCode := 0
-	if p.Opts.Exploit && !p.Opts.DryRun && !p.Rooted && !isRoot() {
-		exitCode = 1
-	}
-	if n := policyGateCount(p); n > 0 {
-		exitCode = 3
-		msg := fmt.Sprintf("  [!] policy gate: %d exploitable finding(s) at/above %s — exit 3\n",
-			n, p.Opts.FailOnRisk.String())
-		if p.Opts.JSON || p.Opts.Quiet {
-			fmt.Fprint(os.Stderr, msg)
-		} else {
-			fmt.Print(msg)
-		}
-	}
+	// without root, 2 = usage error, 3 = --fail-on policy gate or
+	// --fail-on-new regression gate tripped. Both gates are evaluated
+	// last and win: a CI job must fail (3) even when an exploit attempt
+	// also failed (1) — all reports above are already written either way.
+	exitCode, gateMsg := computeExitCode(p)
 	if exitCode != 0 {
+		if gateMsg != "" {
+			if p.Opts.JSON || p.Opts.Quiet {
+				fmt.Fprint(os.Stderr, gateMsg)
+			} else {
+				fmt.Print(gateMsg)
+			}
+		}
 		os.Exit(exitCode)
 	}
+}
+
+// computeExitCode distills the end-of-run decision into (code, message).
+// Pure function over the final run state — testable without spawning the
+// binary. Documented semantics preserved bit for bit: 1 for exploit-without-
+// root, and BOTH gates (policy + regression) override to 3 when they trip,
+// winning over 1 — a CI job must fail even when an exploit also failed.
+// When the gates are set but do NOT trip, the verdict falls through to the
+// classic 0/1 (round-8 contract: gate pass does not mask a failed exploit).
+// The policy gate takes message precedence over the regression gate when
+// both trip — both exit 3 anyway.
+func computeExitCode(p *AutoPrivilege) (int, string) {
+	code := 0
+	if p.Opts.Exploit && !p.Opts.DryRun && !p.Rooted && !isRoot() {
+		code = 1
+	}
+	if n := policyGateCount(p); n > 0 {
+		return 3, fmt.Sprintf("  [!] policy gate: %d exploitable finding(s) at/above %s — exit 3\n",
+			n, p.Opts.FailOnRisk.String())
+	}
+	if p.Opts.FailOnNew && p.Diff != nil && p.Diff.NewExploitable > 0 {
+		return 3, fmt.Sprintf("  [!] regression gate: %d new exploitable finding(s) since baseline — exit 3\n",
+			p.Diff.NewExploitable)
+	}
+	return code, ""
 }
 
 func run() *AutoPrivilege {
@@ -190,6 +209,7 @@ func run() *AutoPrivilege {
 	flag.StringVar(&opts.Output, "output", "", "Write the JSON report to this file (0600)")
 	flag.StringVar(&opts.Baseline, "baseline", "", "Diff findings against a previous --json/--output report")
 	flag.StringVar(&opts.FailOn, "fail-on", "", "Exit 3 if any exploitable finding at/above this risk: low, medium, high, danger")
+	flag.BoolVar(&opts.FailOnNew, "fail-on-new", false, "Exit 3 if any NEW exploitable finding appears vs --baseline (requires it)")
 	flag.StringVar(&opts.Sarif, "sarif", "", "Write a SARIF 2.1.0 report for code-scanning dashboards (GitHub/GitLab)")
 	flag.BoolVar(&opts.SarifStdout, "sarif-stdout", false, "Print the SARIF report to stdout (exclusive with --json)")
 	flag.BoolVar(&opts.Parallel, "parallel", false, "Run scanners concurrently (results identical to sequential)")
@@ -228,6 +248,10 @@ func run() *AutoPrivilege {
 			os.Exit(2)
 		}
 		baseline = b
+	}
+	if opts.FailOnNew && opts.Baseline == "" {
+		fmt.Fprintln(os.Stderr, "  [-] --fail-on-new requires --baseline: the regression gate compares against a previous report")
+		os.Exit(2)
 	}
 	if opts.Ignore != "" {
 		names, err := parseIgnore(opts.Ignore)

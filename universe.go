@@ -107,6 +107,10 @@ type Options struct {
 	// library use may set them directly.
 	FailOnRisk    RiskLevel
 	FailOnEnabled bool
+	// FailOnNew enables the regression gate: exit 3 when the baseline diff
+	// shows ANY new exploitable finding. Requires --baseline (enforced
+	// fail-fast in run()).
+	FailOnNew bool
 	// Sarif is the --sarif output path (empty = no SARIF export).
 	Sarif string
 	// SarifStdout prints the SARIF log to stdout instead of a file

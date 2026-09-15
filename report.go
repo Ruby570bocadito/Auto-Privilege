@@ -103,6 +103,37 @@ func (p *AutoPrivilege) ExportJSON() error {
 	return nil
 }
 
+// atomicWriteFile persists data via temp-file + rename in the destination
+// directory: a crash (or an OOM kill mid-scan in CI) can never leave a
+// TRUNCATED report behind — the artifact a --fail-on/--fail-on-new gate or
+// a --baseline diff reads next run. Rename within the same filesystem is
+// atomic on POSIX, so readers see either the old file or the complete new
+// one, never a half-written document.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// The temp file inherited a umask-affected mode; pin the requested one
+	// before the rename (0600 for reports is a security property, not a
+	// courtesy).
+	if err := os.Chmod(tmp, perm); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // WriteJSONFile saves the exact document --json prints, without depending on
 // shell redirection (the backlog use case: cron jobs and CI pipelines that
 // cannot pipe safely). Perms 0600: the report lists escalation paths and
@@ -112,7 +143,7 @@ func (p *AutoPrivilege) WriteJSONFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	return atomicWriteFile(path, data, 0600)
 }
 
 // WriteMarkdownReport saves a human-readable evidence report with every
@@ -158,7 +189,7 @@ func (p *AutoPrivilege) WriteMarkdownReport(path string) error {
 		out += fmt.Sprintf("- **Command:**\n\n```bash\n%s\n```\n\n", v.Command)
 	}
 
-	return os.WriteFile(path, []byte(out), 0600)
+	return atomicWriteFile(path, []byte(out), 0600)
 }
 
 // markdownSummary renders the at-a-glance counts block of the markdown

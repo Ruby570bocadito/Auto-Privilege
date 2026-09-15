@@ -93,6 +93,8 @@ func usage() {
     --scan-timeout dur        timeout for scan-time external commands (default 5s)
     --fail-on risk            exit 3 when exploitable findings >= risk
                               (low|medium|high|danger) — CI hardening gate
+    --fail-on-new             exit 3 when any NEW exploitable finding appears
+                              vs --baseline — regression gate (requires it)
     --rooteame path           load .ko module if root is obtained (lab only)
     --version                 print version
     -h, --help                this help
@@ -111,6 +113,7 @@ func usage() {
     autoprivilege --output base.json       snapshot, then harden, then:
     autoprivilege --baseline base.json     show new/resolved findings
     autoprivilege --quiet --fail-on high   gate: exit 3 on exploitable high
+    autoprivilege --baseline base.json --fail-on-new   CI: fail only on regressions
     lab/rootless_lab.sh --exploit          safe rootless demo lab
 `
 	fmt.Fprintln(os.Stderr, colorize(out, AnsiGrey))

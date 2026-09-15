@@ -96,7 +96,16 @@ func log(level LogLevel, module, msg, detail string, opts Options) {
 	fmt.Fprint(os.Stderr, line+"\n")
 }
 
-func logScanStart(opts Options)    { log(LogInfo, "scanner", "Starting system scan...", "", opts) }
+func logScanStart(opts Options) { log(LogInfo, "scanner", "Starting system scan...", "", opts) }
+
+// logScanDone reports one scanner's wall-clock duration at DEBUG level:
+// visible only with --verbose (or --log json), silent everywhere else. In
+// --parallel mode the lines interleave by completion order — that IS the
+// information (which scanner finished when), the merged findings stay
+// ordered by scannerOrder regardless.
+func logScanDone(name string, d time.Duration, opts Options) {
+	log(LogDebug, "scanner", fmt.Sprintf("Scanner %s finished in %s", name, d.Round(100*time.Microsecond)), "", opts)
+}
 func logEnumStart(opts Options)    { log(LogInfo, "enum", "Enumerating exploit vectors...", "", opts) }
 func logExploitStart(opts Options) { log(LogInfo, "exploit", "Starting exploitation...", "", opts) }
 func logExploitSkip(name string, opts Options) {

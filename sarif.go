@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 )
 
@@ -204,7 +203,7 @@ func (p *AutoPrivilege) WriteSARIFFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+	return atomicWriteFile(path, data, 0600)
 }
 
 // ExportSARIF prints the SARIF log to stdout for pipelines that consume it
