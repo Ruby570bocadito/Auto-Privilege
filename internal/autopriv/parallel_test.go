@@ -43,14 +43,18 @@ func findingsEqual(a, b []Finding) bool {
 // whatever the goroutines' completion order was. Everything downstream
 // (diff keys, markdown tables, jq pipelines) depends on this stability.
 func TestScanAllParallelDeterministic(t *testing.T) {
-	orig := scannerOrder
-	defer func() { scannerOrder = orig }()
+	// The platform dispatcher is swapped (not scannerOrder): on Windows the
+	// real set lives in windowsScannerOrder, and reaching for scannerOrder
+	// there would run the REAL Windows scanners mid-test. The var indirection
+	// makes the swap identical on every platform.
+	orig := platformScanners
+	defer func() { platformScanners = orig }()
 
 	seq := &AutoPrivilege{Opts: Options{}}
-	scannerOrder = syntheticOrder()
+	platformScanners = func() []func(*AutoPrivilege) { return syntheticOrder() }
 	scanAll(seq) // Parallel=false → sequential path
 
-	scannerOrder = syntheticOrder()
+	platformScanners = func() []func(*AutoPrivilege) { return syntheticOrder() }
 	par := &AutoPrivilege{Opts: Options{Parallel: true}}
 	scanAll(par)
 
@@ -72,21 +76,23 @@ func TestScanAllParallelDeterministic(t *testing.T) {
 // completion order instead of index order would produce BBB/AAA — exactly
 // the contamination this guard exists to catch.
 func TestScanAllParallelOutOfOrderCompletion(t *testing.T) {
-	orig := scannerOrder
-	defer func() { scannerOrder = orig }()
+	orig := platformScanners
+	defer func() { platformScanners = orig }()
 
-	scannerOrder = []func(*AutoPrivilege){
-		func(p *AutoPrivilege) {
-			time.Sleep(120 * time.Millisecond)
-			addFinding(p, "SLOW1", "s1", "must be first", RiskLow, true)
-		},
-		func(p *AutoPrivilege) {
-			time.Sleep(60 * time.Millisecond)
-			addFinding(p, "SLOW2", "s2", "must be second", RiskLow, true)
-		},
-		func(p *AutoPrivilege) {
-			addFinding(p, "FAST", "f1", "finishes first, reports last", RiskLow, true)
-		},
+	platformScanners = func() []func(*AutoPrivilege) {
+		return []func(*AutoPrivilege){
+			func(p *AutoPrivilege) {
+				time.Sleep(120 * time.Millisecond)
+				addFinding(p, "SLOW1", "s1", "must be first", RiskLow, true)
+			},
+			func(p *AutoPrivilege) {
+				time.Sleep(60 * time.Millisecond)
+				addFinding(p, "SLOW2", "s2", "must be second", RiskLow, true)
+			},
+			func(p *AutoPrivilege) {
+				addFinding(p, "FAST", "f1", "finishes first, reports last", RiskLow, true)
+			},
+		}
 	}
 
 	p := &AutoPrivilege{Opts: Options{Parallel: true}}
@@ -107,14 +113,14 @@ func TestScanAllParallelOutOfOrderCompletion(t *testing.T) {
 // --stealth exists to pace host-visible probes, so it wins over --parallel
 // (and both together stay correct).
 func TestScanAllStealthForcesSequential(t *testing.T) {
-	orig := scannerOrder
-	defer func() { scannerOrder = orig }()
+	orig := platformScanners
+	defer func() { platformScanners = orig }()
 
 	seq := &AutoPrivilege{Opts: Options{Stealth: true}}
-	scannerOrder = syntheticOrder()
+	platformScanners = func() []func(*AutoPrivilege) { return syntheticOrder() }
 	scanAll(seq)
 
-	scannerOrder = syntheticOrder()
+	platformScanners = func() []func(*AutoPrivilege) { return syntheticOrder() }
 	both := &AutoPrivilege{Opts: Options{Stealth: true, Parallel: true}}
 	scanAll(both)
 

@@ -66,8 +66,11 @@ func escalateInProcess() error {
 	return errors.New("in-process uid escalation is Linux-only; on Windows follow the enumerated manual vectors")
 }
 
-// platformScanners returns the Windows scanner set (windows_scan.go).
-func platformScanners() []func(*AutoPrivilege) {
+// platformScanners returns the Windows scanner set (windows_scan.go). A
+// package VAR for the same reason as the Linux twin: the parallel-merge test
+// swaps it for a synthetic set instead of reaching into scannerOrder (which
+// is not the Windows set).
+var platformScanners = func() []func(*AutoPrivilege) {
 	return windowsScannerOrder
 }
 

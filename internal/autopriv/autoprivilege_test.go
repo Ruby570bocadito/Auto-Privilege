@@ -1,11 +1,13 @@
 package autopriv
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -240,10 +242,17 @@ func TestSudoVersionCompare(t *testing.T) {
 }
 
 func TestRunCmdOutTimeout(t *testing.T) {
+	// sleep(1) is the Unix prober; Windows has its own ~5s built-in via
+	// ping -n. The contract under test — the timeout guard fires and
+	// errors — is platform-independent.
+	name, args := "sleep", []string{"5"}
+	if runtime.GOOS == "windows" {
+		name, args = "ping", []string{"-n", "5", "127.0.0.1"}
+	}
 	start := time.Now()
-	_, err := runCmdOut(300*time.Millisecond, "sleep", "5")
+	_, err := runCmdOut(300*time.Millisecond, name, args...)
 	if err == nil {
-		t.Error("sleep 5 with 300ms timeout must error")
+		t.Error("a ~5s command under a 300ms timeout must error")
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("timeout did not fire — command blocked")
@@ -252,7 +261,12 @@ func TestRunCmdOutTimeout(t *testing.T) {
 
 func TestExecShellCapturedQuotes(t *testing.T) {
 	// The regression test for the strings.Fields bug: quoted shell syntax
-	// must reach /bin/sh intact.
+	// must reach /bin/sh intact. execShell is the exploitation engine's
+	// primitive — Linux-only by contract, so the round-trip bows out on
+	// Windows instead of depending on Git-for-Windows' sh.exe.
+	if runtime.GOOS == "windows" {
+		t.Skip("execShell round-trips /bin/sh — the exploitation engine is Linux-only")
+	}
 	setColorMode(true)
 	res := execShell(`echo 'import os; os.execlp("sh","sh","-p")'`, Options{}, 5*time.Second)
 	if !res.Success {
@@ -462,7 +476,10 @@ func TestClassifySUID(t *testing.T) {
 }
 
 // captureStdout grabs whatever fn prints to os.Stdout so quiet-mode leaks
-// are detectable.
+// are detectable. The reader drains CONCURRENTLY: an os.Pipe on Windows
+// only buffers ~4 KB (Linux: 64 KB), so a single-threaded read-after-write
+// deadlocks the moment fn prints more than the buffer — the exact hang the
+// first windows-latest CI run hit (job cancelled after 9 silent minutes).
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	orig := os.Stdout
@@ -471,11 +488,18 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	os.Stdout = w
+	done := make(chan struct{})
+	var buf bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&buf, r) // keeps draining while fn writes
+		close(done)
+	}()
 	fn()
 	_ = w.Close()
 	os.Stdout = orig
-	data, _ := io.ReadAll(r)
-	return string(data)
+	<-done
+	_ = r.Close()
+	return buf.String()
 }
 
 func TestPrintQuietRespected(t *testing.T) {
@@ -499,6 +523,11 @@ func TestPrintQuietRespected(t *testing.T) {
 }
 
 func TestCronVectorCommandQuoting(t *testing.T) {
+	// The round-trip below pipes the displayed command through /bin/sh —
+	// the cron technique itself is a Linux surface, so Windows bows out.
+	if runtime.GOOS == "windows" {
+		t.Skip("cron payload round-trip runs through /bin/sh — Linux-only")
+	}
 	p := &AutoPrivilege{Opts: Options{LHost: "10.0.0.1", LPort: "4445"}}
 	enumerateCRON(p, Finding{Source: "CRON", Target: "/etc/cron.d/backup", Exploitable: true})
 	if len(p.Vectors) != 1 {
@@ -755,11 +784,20 @@ func captureStderr(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	os.Stderr = w
+	// Concurrent drain, same reason as captureStdout: a Windows pipe
+	// buffer is ~4 KB and a >4 KB stderr burst would otherwise deadlock.
+	done := make(chan struct{})
+	var buf bytes.Buffer
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(done)
+	}()
 	fn()
 	_ = w.Close()
 	os.Stderr = orig
-	data, _ := io.ReadAll(r)
-	return string(data)
+	<-done
+	_ = r.Close()
+	return buf.String()
 }
 
 func TestLogComposesSingleLine(t *testing.T) {

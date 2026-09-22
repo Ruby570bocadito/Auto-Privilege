@@ -51,6 +51,7 @@ func TestScanPolkitWritableRulesDir(t *testing.T) {
 // directory level, but an existing writable .rules file inside is caught by
 // the per-file pass — polkitd reloads on every change.
 func TestScanPolkitLockedDirPerFilePass(t *testing.T) {
+	skipNonPOSIXPerms(t)
 	if os.Geteuid() == 0 {
 		t.Skip("permisos no distinguibles como root")
 	}
@@ -80,6 +81,7 @@ func TestScanPolkitLockedDirPerFilePass(t *testing.T) {
 // TestScanPolkitSilenceWhenClean: root-owned, non-writable surfaces emit
 // NOTHING — honest absence of evidence.
 func TestScanPolkitSilenceWhenClean(t *testing.T) {
+	skipNonPOSIXPerms(t)
 	if os.Geteuid() == 0 {
 		t.Skip("permisos no distinguibles como root")
 	}

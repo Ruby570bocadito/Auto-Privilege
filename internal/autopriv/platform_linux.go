@@ -66,8 +66,11 @@ func escalateInProcess() error {
 	return nil
 }
 
-// platformScanners returns the Linux scanner set (scanner.go).
-func platformScanners() []func(*AutoPrivilege) {
+// platformScanners returns the Linux scanner set (scanner.go). It is a
+// package VAR (not a plain func) so the parallel-merge test can swap in a
+// synthetic scanner set on every platform — on Windows the equivalent var
+// in platform_windows.go returns windowsScannerOrder.
+var platformScanners = func() []func(*AutoPrivilege) {
 	return scannerOrder
 }
 
