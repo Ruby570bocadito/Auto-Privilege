@@ -858,6 +858,20 @@ func TestScanWritablePathOwnDirsNotFlagged(t *testing.T) {
 	if err := os.Chmod(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// Hermetic: the FN-5 merge reads /etc/environment too, and the
+	// HOST's environment (e.g. the GitHub runner's /opt/pipx_bin,
+	// /usr/local/.ghcup/bin, /usr/local/bin — writable via ACL, owned
+	// by root) leaked real-on-that-host findings into this test. The
+	// seam points at a controlled environment whose PATH is exactly
+	// the dirs we staged.
+	envFile := filepath.Join(t.TempDir(), "environment")
+	envContent := "PATH=\"" + dir + ":/usr/bin\"\n"
+	if err := os.WriteFile(envFile, []byte(envContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	origEnv := loginEnvironmentFile
+	loginEnvironmentFile = envFile
+	t.Cleanup(func() { loginEnvironmentFile = origEnv })
 	t.Setenv("PATH", dir+":/usr/bin")
 	p := &AutoPrivilege{Opts: Options{}}
 	scanWritablePath(p)

@@ -53,7 +53,12 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Lab smoke test — --json --quiet stdout contract
         run: |
-          OUT=$(lab/rootless_lab.sh --json --quiet 2>/dev/null)
+          # Exit 1 is a COMPLETED read-only scan (no root obtained —
+          # the expected lab verdict, faithfully propagated by the
+          # lab script). Only >= 2 (usage/runtime error) breaks the
+          # stdout contract this step guards.
+          OUT=$(lab/rootless_lab.sh --json --quiet 2>/dev/null) || rc=$?
+          if [ "${rc:-0}" -ge 2 ]; then echo "lab exited $rc"; exit "$rc"; fi
           echo "$OUT" | jq -e '.tool == "Auto-Privilege"' > /dev/null
           echo "$OUT" | jq -e '.summary.findings > 0' > /dev/null
           echo "$OUT" | jq -e '.summary.vectors > 0' > /dev/null

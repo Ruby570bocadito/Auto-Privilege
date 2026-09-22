@@ -1435,6 +1435,11 @@ func nfsExportHostless(line string) bool {
 // to. The old version tested the OWNER's write bit (`perm&0200`), which
 // flagged root-owned 755 directories as "writable binary planting" — a false
 // positive the Director reproduced live (honest results demand real access).
+// loginEnvironmentFile backs the FN-5 PAM-level PATH merge. Package
+// var (not a const) so tests can redirect it — same pattern as
+// servicePaths and cronSystemDirs.
+var loginEnvironmentFile = "/etc/environment"
+
 func scanWritablePath(p *AutoPrivilege) {
 	// Running as root, nothing in PATH can escalate further: every
 	// directory is "writable" and every finding would be noise.
@@ -1445,7 +1450,12 @@ func scanWritablePath(p *AutoPrivilege) {
 	// Audit FN-5: /etc/environment carries the PAM-level PATH that LOGIN
 	// sessions use — docker exec and cron never source it, so the process
 	// env alone misses exactly the directory a future login will trust.
-	if data, err := os.ReadFile("/etc/environment"); err == nil {
+	// loginEnvironmentFile is a seam: production always reads the real
+	// /etc/environment; tests point it at a synthetic file so the HOST's
+	// environment can never leak findings into a hermetic run (the
+	// GitHub runner carries writable-but-not-owned dirs there —
+	// /opt/pipx_bin and friends — which broke exactly that way).
+	if data, err := os.ReadFile(loginEnvironmentFile); err == nil {
 		dirs = append(dirs, envPathDirs(string(data))...)
 	}
 	seen := map[string]bool{}
