@@ -77,6 +77,7 @@ func TestMinScoreIgnoresClassic(t *testing.T) {
 		t.Errorf("trip must beat classic 1, got %d", code)
 	}
 	// Same run with the gate disabled → classic 1 preserved.
+	skipAsRoot(t) // the classic-1 fallthrough needs a non-root context
 	off := &AutoPrivilege{
 		Opts:     Options{Exploit: true, MinScore: 0},
 		Findings: []Finding{{Source: "SUID", Risk: RiskLow, Exploitable: true}},

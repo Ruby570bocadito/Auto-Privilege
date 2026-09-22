@@ -134,13 +134,7 @@ func TestWriteSARIFFile(t *testing.T) {
 	if err := p.WriteSARIFFile(path); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("SARIF report must be 0600 like the other report artifacts, got %v", perm)
-	}
+	assertPinned0600(t, path, "SARIF report")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

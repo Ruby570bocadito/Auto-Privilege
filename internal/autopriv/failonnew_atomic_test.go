@@ -23,15 +23,19 @@ func TestComputeExitCodeClassic(t *testing.T) {
 	if code, msg := computeExitCode(&AutoPrivilege{Opts: Options{}}); code != 0 || msg != "" {
 		t.Errorf("scan-only must be (0, \"\"), got (%d,%q)", code, msg)
 	}
-	// Exploit without root: 1.
-	p := &AutoPrivilege{Opts: Options{Exploit: true}}
-	if code, _ := computeExitCode(p); code != 1 {
-		t.Errorf("exploit-no-root must be 1, got %d", code)
-	}
-	// Dry-run never counts as an exploit attempt: 0.
+	// Dry-run never counts as an exploit attempt: 0 (root-independent).
 	pDry := &AutoPrivilege{Opts: Options{Exploit: true, DryRun: true}}
 	if code, _ := computeExitCode(pDry); code != 0 {
 		t.Errorf("dry-run must stay 0, got %d", code)
+	}
+	// Exploit without root: 1. The branch encodes "exploit ran, no root
+	// obtained" — it needs a genuinely non-root context, and an elevated
+	// runner (windows CI runs as admin) is already root: skip only here so
+	// the root-independent assertions above still run everywhere.
+	skipAsRoot(t)
+	p := &AutoPrivilege{Opts: Options{Exploit: true}}
+	if code, _ := computeExitCode(p); code != 1 {
+		t.Errorf("exploit-no-root must be 1, got %d", code)
 	}
 }
 
@@ -117,10 +121,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	if err != nil || string(data) != `{"a":1}` {
 		t.Fatalf("content wrong: %q err=%v", data, err)
 	}
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
-		t.Errorf("perm must be pinned regardless of umask, got %v", info.Mode().Perm())
-	}
+	assertPinned0600(t, path, "atomic write")
 
 	// Overwrite works and no .tmp leftovers ever survive a successful write.
 	if err := atomicWriteFile(path, []byte(`{"a":2}`), 0600); err != nil {

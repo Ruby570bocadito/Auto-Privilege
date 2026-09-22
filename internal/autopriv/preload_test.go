@@ -11,8 +11,11 @@ import (
 // everything, so the distinction the scanner is testing would collapse.
 func skipAsRoot(t *testing.T) {
 	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("writable checks short-circuit for euid 0 — run as a regular user")
+	// isRoot() is the REAL "nothing to escalate" check — euid 0 on Linux,
+	// an elevated token on Windows (CI windows runners run as admin, so
+	// the exploit-without-root contract is not simulable there either).
+	if isRoot() {
+		t.Skip("writable/exploit-without-root checks short-circuit for root — run as a regular user")
 	}
 }
 

@@ -24,3 +24,22 @@ func skipNonPOSIXPerms(t *testing.T) {
 		t.Skip("POSIX permission-bit semantics are not simulable on Windows (directory chmod is a no-op there)")
 	}
 }
+
+// assertPinned0600 pins the report-artifact permission contract: every
+// report the tool writes lands at 0600 regardless of the process umask.
+// Windows mode bits cannot express 0600 (only the read-only attribute
+// exists), so the assertion bows out there — NTFS ACLs govern instead and
+// the write itself is still exercised by the caller.
+func assertPinned0600(t *testing.T, path, what string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Errorf("%s must be 0600, got %v", what, got)
+	}
+}

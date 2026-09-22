@@ -70,13 +70,7 @@ func TestHTMLReportStructureAndPerms(t *testing.T) {
 	if err := p.WriteHTMLReport(path); err != nil {
 		t.Fatalf("WriteHTMLReport: %v", err)
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := fi.Mode().Perm(); got != 0600 {
-		t.Errorf("HTML report perms = %v, want 0600", got)
-	}
+	assertPinned0600(t, path, "HTML report")
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".tmp") {
