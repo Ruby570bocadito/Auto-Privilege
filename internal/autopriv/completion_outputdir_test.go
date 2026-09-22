@@ -3,6 +3,7 @@ package autopriv
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -99,8 +100,10 @@ func TestEnsureOutputDir(t *testing.T) {
 	if err != nil || !fi.IsDir() {
 		t.Fatalf("nested dir not created: %v", err)
 	}
-	if got := fi.Mode().Perm(); got != 0700 {
-		t.Errorf("created dir perms = %v, want 0700", got)
+	if runtime.GOOS != "windows" {
+		if got := fi.Mode().Perm(); got != 0700 {
+			t.Errorf("created dir perms = %v, want 0700", got)
+		}
 	}
 	// existing dir is fine
 	if err := ensureOutputDir(filepath.Join(dir, "a", "b", "x.json")); err != nil {

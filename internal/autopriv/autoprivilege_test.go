@@ -962,13 +962,7 @@ func TestOutputFlagWritesJSON(t *testing.T) {
 	if rep.Summary.Findings != 1 || rep.Summary.Exploitable != 1 {
 		t.Errorf("summary must mirror the scan (1/1), got %+v", rep.Summary)
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Errorf("report lists escalation paths: perms must be 0600, got %o", perm)
-	}
+	assertPinned0600(t, path, "JSON report")
 }
 
 func TestSetBitRootsIncludeLib64(t *testing.T) {
