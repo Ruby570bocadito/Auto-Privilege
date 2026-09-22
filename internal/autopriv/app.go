@@ -62,7 +62,15 @@ func Run() {
 			}
 		}
 		if shown == 0 {
-			fmt.Println(colorize("    (no exploitable findings — system looks clean)", AnsiGrey))
+			// INC-3: the victory message must be earned. "system looks
+			// clean" over eighteen informational findings was a lie of
+			// emphasis — now the count is spelled out with the commands
+			// that surface the retained leads.
+			if len(p.Findings) == 0 {
+				fmt.Println(colorize("    (no findings — system looks clean)", AnsiGrey))
+			} else {
+				fmt.Println(colorize(fmt.Sprintf("    (no exploitable findings — %d informational note(s) retained; inspect with --min-risk low or --json)", len(p.Findings)), AnsiGrey))
+			}
 		}
 	}
 

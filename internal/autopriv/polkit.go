@@ -35,6 +35,12 @@ var polkitLocalAuthorityDirs = []string{
 }
 
 func scanPolkit(p *AutoPrivilege) {
+	// Root guard (audit FP-1): every polkit surface is writable for root on
+	// a pristine host — a privileged scan must not report its own powers as
+	// findings.
+	if currentEUID() == 0 {
+		return
+	}
 	scanPolkitPaths(p, polkitRulesDir, polkitLocalAuthorityDirs)
 }
 

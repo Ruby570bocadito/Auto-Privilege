@@ -325,6 +325,12 @@ func printSummary(p *AutoPrivilege, elapsed time.Duration) {
 	fmt.Printf("   %-10s %d  (%s %d · %s %d)\n", "vectors", len(p.Vectors), "auto", auto, "manual", manual)
 	fmt.Printf("   %-10s %s\n", "risks", strings.TrimRight(riskLine, " "))
 	fmt.Printf("   %-10s %s\n", "rooted", rooted)
+	if isRoot() {
+		// FP-1 contract: escalation scanners are skipped for root by
+		// design — say so instead of letting a near-empty root scan read
+		// as "pristine host".
+		fmt.Println(colorize("   note       running as root — escalation checks skipped by design; rerun as an unprivileged user for the attack surface", AnsiGrey))
+	}
 	fmt.Printf("   %-10s %s\n", "time", elapsed.Round(100*time.Millisecond))
 	if p.Opts.Report != "" {
 		fmt.Printf("   %-10s %s\n", "report", p.Opts.Report)

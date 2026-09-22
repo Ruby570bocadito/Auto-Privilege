@@ -1,6 +1,7 @@
 package autopriv
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"math/rand"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -15,6 +17,13 @@ import (
 	"sync"
 	"time"
 )
+
+// currentEUID is the effective-uid source for every root guard in the
+// scanner suite (audit FP-1). It is a package var rather than a direct
+// os.Geteuid call so the test suite can simulate an unprivileged scan on
+// elevated CI runners — the guards themselves are what keep a root run
+// from reporting "writable /etc/passwd" on a pristine host.
+var currentEUID = os.Geteuid
 
 // ================================================================
 // FASE 1 — Scanner: passivo, no modifica nada
@@ -54,6 +63,7 @@ func scanAll(p *AutoPrivilege) {
 				time.Sleep(time.Duration(100+rand.Intn(300)) * time.Millisecond)
 			}
 		}
+		p.Findings = dedupFindings(p.Findings)
 		return
 	}
 
@@ -78,6 +88,51 @@ func scanAll(p *AutoPrivilege) {
 	for _, findings := range perScanner {
 		p.Findings = append(p.Findings, findings...)
 	}
+	// Same-access dedup (audit FP-9) runs on the merged result so both
+	// engines — sequential and parallel — hand identical findings to every
+	// downstream consumer (terminal, JSON, reports, gates, score).
+	p.Findings = dedupFindings(p.Findings)
+}
+
+// dedupFindings collapses findings that describe the same underlying
+// access (audit FP-9). Docker group membership, a writable docker socket
+// and a CLI-reachable daemon are ONE breakout path, not three findings;
+// a full sudo grant subsumes every per-binary rule below it. Rules:
+//
+//   - any DOCKER finding present  → drop CONTAINER/docker-daemon (same access)
+//   - writable docker socket      → drop the DOCKER group-membership note
+//   - SUDO "ALL" (full grant)     → drop per-binary SUDO findings
+//
+// Pure function over the slice — table-tested in audit_fixes_test.go.
+func dedupFindings(fs []Finding) []Finding {
+	hasDockerSocket, hasDockerAny, hasSudoAll := false, false, false
+	for _, f := range fs {
+		switch {
+		case f.Source == "DOCKER" && f.Target == "/var/run/docker.sock":
+			hasDockerSocket, hasDockerAny = true, true
+		case f.Source == "DOCKER":
+			hasDockerAny = true
+		case f.Source == "SUDO" && f.Target == "ALL":
+			hasSudoAll = true
+		}
+	}
+	if !hasDockerAny && !hasSudoAll {
+		return fs
+	}
+	out := make([]Finding, 0, len(fs))
+	for _, f := range fs {
+		if f.Source == "CONTAINER" && f.Target == "docker-daemon" && hasDockerAny {
+			continue
+		}
+		if f.Source == "DOCKER" && hasDockerSocket && f.Target != "/var/run/docker.sock" {
+			continue
+		}
+		if f.Source == "SUDO" && hasSudoAll && f.Target != "ALL" {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // scannerName recovers a scanner's identity for the --verbose timing log:
@@ -148,6 +203,51 @@ var setBitRoots = []string{
 	"/usr/lib64", "/lib64",
 }
 
+// standardSUIDBins / standardSGIDBins are the distribution-baseline setuid
+// files (audit INC-2): su, sudo, passwd, mount and friends ship setuid on
+// every stock Ubuntu/Debian host. The old scanner reported all seventeen
+// as findings, a clean container bled 34 score points and the real signals
+// drowned in inventory noise. Baseline binaries are skipped entirely —
+// only deviations from the baseline surface. The skip is bounded to the
+// system locations (isStandardBinLocation) so a setuid "passwd" planted in
+// /opt still shows up.
+var standardSUIDBins = map[string]bool{
+	"at": true, "bwrap": true, "chage": true, "chfn": true, "chsh": true,
+	"crontab": true, "dbus-daemon-launch-helper": true, "expiry": true,
+	"fusermount": true, "fusermount3": true, "gpasswd": true, "mount": true,
+	"mtr-packet": true, "newgrp": true, "passwd": true, "pkexec": true,
+	"pppd": true, "sg": true, "snap-confine": true, "ssh-keysign": true,
+	"su": true, "sudo": true, "umount": true, "unix_chkpwd": true,
+	"pam_extrausers_chkpwd": true,
+}
+
+var standardSGIDBins = map[string]bool{
+	"chage": true, "crontab": true, "expiry": true, "locate": true,
+	"mail": true, "mlocate": true, "netreport": true, "plocate": true,
+	"ssh-agent": true, "utempter": true, "wall": true, "write": true,
+	"unix_chkpwd": true,
+}
+
+// standardBinLocationPrefixes are the trees where a baseline setuid binary
+// is expected to live. /opt and /usr/local are deliberately absent: a
+// setuid file there is a deviation worth reporting even under a familiar
+// name.
+var standardBinLocationPrefixes = []string{
+	"/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/", "/usr/libexec/",
+	"/usr/lib64/", "/lib64/", "/lib/", "/snap/bin/", "/usr/lib/openssh/",
+}
+
+// isStandardBinLocation reports whether full sits inside one of the
+// baseline trees. Pure function — table-tested.
+func isStandardBinLocation(full string) bool {
+	for _, pref := range standardBinLocationPrefixes {
+		if strings.HasPrefix(full, pref) {
+			return true
+		}
+	}
+	return false
+}
+
 // maxSetBitDepth bounds the recursive walk so a pathological tree (or a
 // symlink loop that survived our symlink guard) can never stall the scan.
 const maxSetBitDepth = 4
@@ -161,6 +261,11 @@ func scanSetBits(p *AutoPrivilege) {
 	for _, dir := range setBitRoots {
 		walkSetBits(p, dir, 0, seen)
 	}
+	// Second pass (audit FN-2): a renamed copy of a GTFOBins binary
+	// (cp /usr/bin/find /opt/secure/bin/custom-find; chmod u+s) survives
+	// the name-based lookup above as an unknown — content hashing against
+	// the pristine copies on this host unmasks it.
+	detectRenamedSUID(p)
 }
 
 // processSetBitEntryFn is the hook the walk uses to classify and store each
@@ -177,11 +282,27 @@ var processSetBitEntryFn = func(p *AutoPrivilege, full string, e os.DirEntry, in
 		return
 	}
 	if info.Mode()&os.ModeSetuid != 0 {
+		// Distribution baseline (INC-2): su, sudo, passwd… are inventory,
+		// not findings — but only in the trees where they are expected.
+		if standardSUIDBins[e.Name()] && isStandardBinLocation(full) {
+			return
+		}
 		risk, expl := classifySUID(e.Name(), uid)
+		if currentEUID() == 0 && expl {
+			// FP-1: running as root, a setuid file grants this process
+			// nothing it lacks — honest inventory, no escalation claim.
+			risk, expl = RiskLow, false
+		}
 		reportSetBit(p, "SUID", e.Name(), full, uid, risk, expl)
 	}
 	if info.Mode()&os.ModeSetgid != 0 {
+		if standardSGIDBins[e.Name()] && isStandardBinLocation(full) {
+			return
+		}
 		risk, expl := classifySGID(e.Name(), gid)
+		if currentEUID() == 0 && expl {
+			risk, expl = RiskMedium, false
+		}
 		reportSetBit(p, "SGID", e.Name(), full, gid, risk, expl)
 	}
 }
@@ -252,67 +373,255 @@ func reportSetBit(p *AutoPrivilege, kind, bin, full string, ownerID uint32, risk
 	addFinding(p, kind, full, fmt.Sprintf("%s binary: %s (%s)", kind, bin, reason), RiskLow, false)
 }
 
+// --- Renamed SUID detection (content hashing, audit FN-2) ---
+// referenceBinDirs is where rename detection looks for the pristine copies
+// of GTFOBins binaries to hash against.
+var referenceBinDirs = []string{"/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local/bin"}
+
+// maxHashBytes caps hashing so a pathological file can never stall the
+// scan: anything bigger than this is not a "renamed copy" scenario.
+const maxHashBytes = 100 << 20
+
+// hashFile returns the hex SHA-256 of a regular file, or "" when the path
+// is unreadable, not regular, or over the size cap. Symlinks are rejected
+// (Lstat): only real bytes are compared.
+func hashFile(path string) string {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxHashBytes {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, maxHashBytes+1)); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// detectRenamedSUID upgrades the "unknown SUID" findings of this scanner's
+// own pass: every root-owned non-GTFOBins-named setuid file is hashed and
+// compared against the pristine GTFOBins binaries present on this host.
+// Identical bytes under a different name is the renamed-SUID trick
+// (`cp /usr/bin/find /opt/secure/bin/custom-find; chmod u+s`), and the
+// finding is rewritten in place to say exactly what the file is. The order
+// of p.Findings is preserved (the parallel-merge contract depends on it).
+func detectRenamedSUID(p *AutoPrivilege) {
+	var candidates []int
+	for i, f := range p.Findings {
+		// Only this scanner's own output: SUID, non-exploitable, and the
+		// "GTFOBins: false" reason marks a root-owned unknown. Non-root
+		// owners say "not a root vector" and are not copies of interest.
+		if f.Source == "SUID" && !f.Exploitable && strings.Contains(f.Description, "GTFOBins: false") {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	// Reference index: hash → canonical GTFOBins name. First pristine copy
+	// of each hash wins (vi/vim dups collapse harmlessly).
+	refs := map[string]string{}
+	for name := range gtfoLookup {
+		for _, dir := range referenceBinDirs {
+			if h := hashFile(filepath.Join(dir, name)); h != "" {
+				refs[h] = name
+				break
+			}
+		}
+	}
+	if len(refs) == 0 {
+		return
+	}
+	for _, i := range candidates {
+		orig, ok := refs[hashFile(p.Findings[i].Target)]
+		if !ok {
+			continue
+		}
+		f := &p.Findings[i]
+		f.Description = fmt.Sprintf("SUID binary: %s is a byte-identical copy of %s — renamed GTFOBins binary", filepath.Base(f.Target), orig)
+		f.Risk, f.Exploitable = RiskHigh, true
+		if currentEUID() == 0 {
+			// FP-1: root cannot escalate past root — inventory only.
+			f.Risk, f.Exploitable = RiskLow, false
+		}
+	}
+}
+
 // --- Sudo ---
+// sudoRule is one parsed command spec from `sudo -n -l` output: the binary,
+// its fixed arguments (empty for a FREE rule) and whether a tag made it
+// passwordless.
+type sudoRule struct {
+	Bin          string
+	Args         string
+	Passwordless bool
+}
+
+// parseSudoRules parses the command section of `sudo -l` output into
+// rules. Grammar handled (audit FP-8 — the old parser grabbed every
+// slash-token in sight, so `/usr/bin/find /var/www` reported a free
+// "NOPASSWD sudo: find" while the rule was actually path-restricted):
+//
+//	(root) /usr/bin/awk                           — free rule, password required
+//	(ALL) NOPASSWD: /usr/bin/find                 — free rule, passwordless
+//	(root) NOPASSWD: /usr/bin/tar -cf /dev/null * — restricted rule
+//	(ALL) ALL                                     — full access
+//
+// Comma-separated spec lists and repeated (runas) segments are handled;
+// header lines, Defaults and prose never start with "(" and are skipped.
+// Pure function — table-tested against real sudo -l transcripts.
+func parseSudoRules(output string) []sudoRule {
+	var rules []sudoRule
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "(") {
+			continue
+		}
+		passwordless := false
+		for _, spec := range strings.Split(line, ", ") {
+			spec = strings.TrimSpace(spec)
+			if spec == "" {
+				continue
+			}
+			// optional runas segment at spec start: "(root) /usr/bin/awk"
+			if strings.HasPrefix(spec, "(") {
+				i := strings.Index(spec, ")")
+				if i < 0 {
+					continue
+				}
+				spec = strings.TrimSpace(spec[i+1:])
+			}
+			if strings.HasPrefix(spec, "NOPASSWD:") {
+				passwordless = true
+				spec = strings.TrimSpace(spec[len("NOPASSWD:"):])
+			} else if strings.HasPrefix(spec, "PASSWD:") {
+				passwordless = false
+				spec = strings.TrimSpace(spec[len("PASSWD:"):])
+			}
+			fields := strings.Fields(spec)
+			if len(fields) == 0 {
+				continue
+			}
+			rules = append(rules, sudoRule{
+				Bin:          fields[0],
+				Args:         strings.Join(fields[1:], " "),
+				Passwordless: passwordless,
+			})
+		}
+	}
+	return rules
+}
+
 func scanSudo(p *AutoPrivilege) {
-	// Canonical resolver: under su/sudo -s the USER env var lies (it keeps
-	// pointing at the pre-su user, or disappears), and `groups <wrong>`
-	// silently kills the sudo/wheel group check below. scanDocker already
-	// used currentUsername(); this scanner now matches the standard.
+	// Root guard (audit FP-1): a root run of `sudo -n -l` lists (ALL) ALL
+	// on literally any host — root already holds every power sudo grants.
+	if currentEUID() == 0 {
+		return
+	}
 	user := currentUsername()
 
 	// sudo -n fails fast instead of prompting for a password (the old
 	// `sudo -l` fallback hung forever in labs without a password).
 	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "sudo", "-n", "-l")
 	if err != nil {
+		// `sudo -n -l` fails for two very different reasons. No rules at
+		// all → honest silence. Rules that need a password → "sudo: a
+		// password is required" in the combined output. The second case is
+		// a real escalation path for the account owner (audit FN-4: a
+		// `k ALL=(ALL) ALL` user was invisible — "no exploitable findings"
+		// — while their own password turns sudo into root). It surfaces as
+		// a visible, non-gate-tripping lead: passworded sudo is the
+		// standard admin setup, not a misconfiguration.
+		if strings.Contains(string(out), "a password is required") {
+			addFinding(p, "SUDO", user,
+				"Passworded sudo rules exist — the account's own password may unlock root (run `sudo -l` to review; standard admin setup on desktops)",
+				RiskMedium, false)
+			return
+		}
+		// Group fallback: no rules readable and no prompt seen, but
+		// sudo/wheel membership is itself the classic grant.
+		if isInGroup(p.Opts, user, "sudo") || isInGroup(p.Opts, user, "wheel") {
+			addFinding(p, "SUDO", user,
+				"User in sudo/wheel group — passworded sudo likely (own password unlocks root); verify with `sudo -l`",
+				RiskMedium, false)
+		}
 		return
 	}
 
-	output := string(out)
-	lines := strings.Split(output, "\n")
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Matching") || strings.HasPrefix(line, "User") {
-			continue
-		}
-
-		// Parse: (ALL) NOPASSWD: /usr/bin/find
-		// Parse: (root) /usr/bin/awk
-		if strings.Contains(line, "NOPASSWD:") || strings.Contains(line, "PASSWD:") ||
-			(strings.HasPrefix(line, "(") && strings.Contains(line, "/")) {
-
-			parts := strings.Fields(line)
-			for _, part := range parts {
-				part = strings.TrimRight(part, ",")
-				if strings.HasPrefix(part, "/") {
-					bin := filepath.Base(part)
-					if cmd, ok := getCommand(bin); ok {
-						addFinding(p, "SUDO", part,
-							fmt.Sprintf("NOPASSWD sudo: %s → %s", part, strings.SplitN(cmd, " ", 2)[0]),
-							RiskHigh, true)
-					}
-				}
+	rules := parseSudoRules(string(out))
+	full, fullPasswordless := false, false
+	for _, r := range rules {
+		if r.Bin == "ALL" {
+			full = true
+			if r.Passwordless {
+				fullPasswordless = true
 			}
 		}
 	}
-
-	// Check sudo ALL
-	if strings.Contains(output, "(ALL) ALL") || strings.Contains(output, "(root) ALL") ||
-		strings.Contains(output, "(ALL : ALL) ALL") {
-		addFinding(p, "SUDO", "ALL",
-			"Full sudo access — instant root",
-			RiskHigh, true)
+	if full {
+		if fullPasswordless {
+			addFinding(p, "SUDO", "ALL",
+				"Full passwordless sudo — instant root",
+				RiskHigh, true)
+		} else {
+			addFinding(p, "SUDO", "ALL",
+				"Full sudo access (password required) — the account's own password unlocks root",
+				RiskMedium, false)
+		}
+		// FP-9: a full grant subsumes every per-binary rule — reporting
+		// both double-counts the same access in gates and score.
+		return
 	}
 
-	// Check if user is in sudo group
-	if isInGroup(p.Opts, user, "sudo") || isInGroup(p.Opts, user, "wheel") {
-		// Try passwordless sudo (timeout guard)
-		out3, err3 := runCmdOut(p.Opts.scanCmdTimeout(), "sudo", "-n", "true")
-		_ = out3
-		if err3 == nil {
-			addFinding(p, "SUDO", user,
-				"User has passwordless sudo",
-				RiskHigh, true)
+	seen := map[string]bool{}
+	for _, r := range rules {
+		if !strings.HasPrefix(r.Bin, "/") {
+			continue // non-absolute specs are not command rules
+		}
+		key := r.Bin + "|" + strconv.FormatBool(r.Passwordless)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		bin := filepath.Base(r.Bin)
+		_, isGTFO := getCommand(bin)
+		switch {
+		case r.Args != "" && r.Passwordless:
+			// FP-8: arguments restrict the invocation. The textbook
+			// "sudo find → root" technique does not apply verbatim when
+			// sudo itself pins the argument list; an escape may still
+			// exist (wildcards, subcommands) but that is manual review,
+			// not a confirmed vector.
+			addFinding(p, "SUDO", r.Bin,
+				fmt.Sprintf("Restricted NOPASSWD sudo: %s %s — args pin the invocation; review whether they still permit a technique escape", r.Bin, r.Args),
+				RiskMedium, false)
+		case r.Args != "":
+			addFinding(p, "SUDO", r.Bin,
+				fmt.Sprintf("Restricted sudo (password required): %s %s — review the args before use", r.Bin, r.Args),
+				RiskLow, false)
+		case r.Passwordless && isGTFO:
+			if cmd, ok := getCommand(bin); ok {
+				addFinding(p, "SUDO", r.Bin,
+					fmt.Sprintf("NOPASSWD sudo: %s → %s", r.Bin, strings.SplitN(cmd, " ", 2)[0]),
+					RiskHigh, true)
+			}
+		case r.Passwordless:
+			addFinding(p, "SUDO", r.Bin,
+				fmt.Sprintf("NOPASSWD sudo on %s — runs as root; check whether the binary is escapable", r.Bin),
+				RiskLow, false)
+		default:
+			// Free rule, password required (FN-4): a real vector for the
+			// account owner, authorized-by-design on admin machines —
+			// visible, never gate-tripping.
+			if isGTFO {
+				addFinding(p, "SUDO", r.Bin,
+					fmt.Sprintf("sudo (password required): %s — the account's own password turns this into root", r.Bin),
+					RiskMedium, false)
+			}
 		}
 	}
 }
@@ -331,18 +640,33 @@ func isInGroup(o Options, user, group string) bool {
 }
 
 // --- Cron ---
-func scanCron(p *AutoPrivilege) {
-	cronDirs := []string{
-		"/etc/cron.d",
-		"/etc/cron.daily",
-		"/etc/cron.hourly",
-		"/etc/cron.weekly",
-		"/etc/cron.monthly",
-		"/var/spool/cron/crontabs",
-		"/var/spool/cron",
-	}
+// cronSystemDirs hold schedules whose jobs execute as root: any writable
+// file here is injectable, and any script they reference is load-bearing.
+var cronSystemDirs = []string{
+	"/etc/cron.d",
+	"/etc/cron.daily",
+	"/etc/cron.hourly",
+	"/etc/cron.weekly",
+	"/etc/cron.monthly",
+}
 
-	for _, dir := range cronDirs {
+// cronSpoolDirs hold per-user crontabs; the FILE NAME is the owning user,
+// and each user's jobs run as that user — never as root.
+var cronSpoolDirs = []string{
+	"/var/spool/cron/crontabs",
+	"/var/spool/cron",
+}
+
+func scanCron(p *AutoPrivilege) {
+	// Root guard (audit FP-1): as root every cron file is writable and the
+	// scanner degrades into a wall of noise on a pristine host.
+	if currentEUID() == 0 {
+		return
+	}
+	user := currentUsername()
+
+	// System schedules run as root.
+	for _, dir := range cronSystemDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -353,7 +677,6 @@ func scanCron(p *AutoPrivilege) {
 			if name == ".placeholder" || strings.HasPrefix(name, ".") {
 				continue
 			}
-			// Skip directories
 			if e.IsDir() {
 				continue
 			}
@@ -362,44 +685,144 @@ func scanCron(p *AutoPrivilege) {
 			if err != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			// Check if we can actually write
 			if isWritableByCurrentUser(full) {
 				addFinding(p, "CRON", full,
-					"Writable cron job — inject command",
+					"Writable root cron file — inject command (runs as root)",
 					RiskHigh, true)
 				continue
 			}
-			// Not writable: the root-run schedule can still be
-			// abused through wildcard-absorption (see the heuristic
-			// below) — read-only content analysis, nothing executed.
+			// Not writable: the root-run schedule can still be abused
+			// through wildcard-absorption (heuristic below) or through a
+			// referenced script this user can swap (FN-3) — read-only
+			// content analysis, nothing executed.
 			if isReadable(full) {
 				scanCronWildcards(p, full)
+				scanCronReferencedScripts(p, full)
 			}
 		}
 	}
+	// The legacy /etc/crontab gets the same two-pass treatment.
+	scanCrontabFile(p, "/etc/crontab")
 
-	// Check crontab -l for writable scripts referenced
-	// (runCmdOut guard: the project standard — no bare exec calls in scans)
-	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "crontab", "-l")
-	if err == nil && len(out) > 0 {
-		lines := strings.Split(string(out), "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "#") || line == "" {
+	// Per-user spool crontabs. Audit FP-5: your OWN crontab runs as YOU —
+	// writing it or its scripts is not an escalation and must stay silent.
+	// Another user's crontab (root's above all) is a real target.
+	seenSpool := map[string]bool{}
+	for _, dir := range cronSpoolDirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if name == ".placeholder" || strings.HasPrefix(name, ".") || e.IsDir() {
 				continue
 			}
-			fields := strings.Fields(line)
-			for _, f := range fields {
-				if strings.HasPrefix(f, "/") {
-					info, err := os.Lstat(f)
-					if err == nil && info.Mode().Perm()&0200 != 0 && !info.IsDir() {
-						if isWritableByCurrentUser(f) {
-							addFinding(p, "CRON", f,
-								"Crontab references writable file",
-								RiskHigh, true)
-						}
-					}
+			if name == user {
+				continue
+			}
+			full := filepath.Join(dir, name)
+			resolved, err := filepath.EvalSymlinks(full)
+			if err != nil {
+				resolved = full
+			}
+			if seenSpool[resolved] {
+				continue
+			}
+			seenSpool[resolved] = true
+			info, err := os.Lstat(full)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			if isWritableByCurrentUser(full) {
+				if name == "root" {
+					addFinding(p, "CRON", full,
+						"Writable root crontab — inject a root command",
+						RiskHigh, true)
+				} else {
+					addFinding(p, "CRON", full,
+						fmt.Sprintf("Writable crontab of user %s — jobs run as that user (lateral, not root)", name),
+						RiskMedium, false)
 				}
+				continue
+			}
+			// Readable root spool crontab: referenced scripts matter too.
+			if name == "root" && isReadable(full) {
+				scanCronReferencedScripts(p, full)
+			}
+		}
+	}
+}
+
+// scanCrontabFile applies the writable-check + referenced-scripts pass to a
+// single schedule file (/etc/crontab).
+func scanCrontabFile(p *AutoPrivilege, path string) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	if isWritableByCurrentUser(path) {
+		addFinding(p, "CRON", path,
+			"Writable /etc/crontab — inject a root command",
+			RiskHigh, true)
+		return
+	}
+	if isReadable(path) {
+		scanCronReferencedScripts(p, path)
+	}
+}
+
+// cronReferencedPaths extracts candidate file paths from one cron command
+// line: the binary, its file arguments and redirect targets (">log",
+// "2>/dev/null" — the target follows the last ">"). Env assignments
+// ("PATH=/usr/bin") never look like paths because they carry no ">" and do
+// not start with "/". Pure function — table-tested.
+func cronReferencedPaths(line string) []string {
+	var out []string
+	for _, f := range strings.Fields(line) {
+		if i := strings.LastIndex(f, ">"); i >= 0 {
+			f = f[i+1:]
+		}
+		f = strings.Trim(f, "\"'")
+		if strings.HasPrefix(f, "/") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// scanCronReferencedScripts reads a root-run schedule file and flags any
+// referenced script the current user can write: the schedule itself can be
+// fully locked down while its payload is swappable. Audit FN-3 — the old
+// check only ever ran over the user's OWN `crontab -l` output (pure FP-5
+// territory) and never looked at /etc/cron.d references. Device nodes
+// (/dev/null in a redirect) are excluded by the regular-file check.
+func scanCronReferencedScripts(p *AutoPrivilege, path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	self, _ := filepath.EvalSymlinks(path)
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		for _, ref := range cronReferencedPaths(line) {
+			info, err := os.Lstat(ref)
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			resolved, _ := filepath.EvalSymlinks(ref)
+			if resolved == self || seen[resolved] {
+				continue
+			}
+			seen[resolved] = true
+			if isWritableByCurrentUser(ref) {
+				addFinding(p, "CRON", ref,
+					fmt.Sprintf("Root cron %s references user-writable script — replace the payload, wait for the schedule", filepath.Base(path)),
+					RiskHigh, true)
 			}
 		}
 	}
@@ -468,7 +891,21 @@ func scanCronWildcards(p *AutoPrivilege, path string) {
 }
 
 // --- /etc/passwd writable ---
+// --- /etc/passwd writable ---
 func scanPasswd(p *AutoPrivilege) {
+	// Root guard (audit FP-1): root can write anything by definition — the
+	// old check fired "Writable /etc/passwd" on every pristine host scanned
+	// as root. The only honest root-run signal is a permission-bit
+	// MISCONFIGURATION (group/world-writable), which is exactly what other
+	// local users would abuse.
+	if currentEUID() == 0 {
+		if info, err := os.Lstat("/etc/passwd"); err == nil && info.Mode().Perm()&0022 != 0 {
+			addFinding(p, "FILE", "/etc/passwd",
+				"Group/world-writable /etc/passwd (misconfiguration) — any local user can inject a root account",
+				RiskHigh, false)
+		}
+		return
+	}
 	if isWritableByCurrentUser("/etc/passwd") {
 		addFinding(p, "FILE", "/etc/passwd",
 			"Writable /etc/passwd — inject root user",
@@ -477,7 +914,29 @@ func scanPasswd(p *AutoPrivilege) {
 }
 
 // --- /etc/shadow readable/writable ---
+// --- /etc/shadow readable/writable ---
 func scanShadow(p *AutoPrivilege) {
+	// Root guard (audit FP-1), same contract as scanPasswd: as root the
+	// readable/writable questions are meaningless (the answer is always
+	// yes), but the permission bits still tell the truth about what OTHER
+	// users can do. Ubuntu's 0640 root:shadow stays silent; 0644 or 0666 are
+	// real misconfigurations worth surfacing from any uid.
+	if currentEUID() == 0 {
+		if info, err := os.Lstat("/etc/shadow"); err == nil {
+			perm := info.Mode().Perm()
+			if perm&0004 != 0 {
+				addFinding(p, "FILE", "/etc/shadow",
+					"World-readable /etc/shadow (misconfiguration) — hashes crackable by any local user",
+					RiskHigh, false)
+			}
+			if perm&0022 != 0 {
+				addFinding(p, "FILE", "/etc/shadow",
+					"Group/world-writable /etc/shadow (misconfiguration)",
+					RiskDanger, false)
+			}
+		}
+		return
+	}
 	// The old check tested the OWNER permission bit (root's), which is set on
 	// every system on earth — a false positive machine. Test real access.
 	if isReadable("/etc/shadow") {
@@ -493,22 +952,30 @@ func scanShadow(p *AutoPrivilege) {
 }
 
 // --- Docker ---
+// --- Docker ---
 func scanDocker(p *AutoPrivilege) {
-	// Real group parsing — substring matching produced false positives
-	// for users like "dockerdb".
-	if isInGroup(p.Opts, currentUsername(), "docker") {
-		addFinding(p, "DOCKER", currentUsername(),
-			"User in docker group — container breakout to root",
-			RiskHigh, true)
+	// Root guard (audit FP-1): root owns the socket — membership and
+	// writability tell it nothing it does not already have.
+	if currentEUID() == 0 {
+		return
 	}
-
-	// The socket must be genuinely writable by us, not merely group-flagged.
+	// Audit FP-9: group membership, a writable socket and a reachable
+	// daemon are ONE breakout path. The socket is the most direct evidence,
+	// so it owns the exploitable finding; the group note only appears when
+	// the socket is NOT directly writable (rootless daemon, DOCKER_HOST).
+	socketWritable := false
 	if info, err := os.Lstat("/var/run/docker.sock"); err == nil && info.Mode()&os.ModeSocket != 0 {
 		if isWritableByCurrentUser("/var/run/docker.sock") {
+			socketWritable = true
 			addFinding(p, "DOCKER", "/var/run/docker.sock",
 				"Writable docker socket — container breakout to root",
 				RiskHigh, true)
 		}
+	}
+	if !socketWritable && isInGroup(p.Opts, currentUsername(), "docker") {
+		addFinding(p, "DOCKER", currentUsername(),
+			"User in docker group but socket not writable here — rootless or remote daemon? verify with `docker ps`",
+			RiskMedium, false)
 	}
 }
 
@@ -619,6 +1086,16 @@ func canonicalSocketPaths(paths []string) []string {
 // "inside a container" indicator never claims escalation by itself (the
 // breakout technique must come from a reachable runtime), and the daemon CLI
 // check notes that rootless runtimes contain the classic breakout.
+// scanContainers reports the container context the tool itself runs in and
+// the container-runtime breakout surfaces around it. Honesty rules: the
+// "inside a container" indicator never claims escalation by itself (the
+// breakout technique must come from a reachable runtime), the daemon CLI
+// check notes that rootless runtimes contain the classic breakout, and —
+// audit FP-2 — a SINGLE NSpid value is the bare-metal default, never
+// container evidence. The old logic counted "host PID namespace visible"
+// as proof of being in a container and fired on every laptop and WSL host
+// with a self-contradictory message; only an OWN PID namespace (NSpid
+// listing two or more ids) is a container signal now.
 func scanContainers(p *AutoPrivilege) {
 	var evidence []string
 	privileged := false
@@ -633,15 +1110,11 @@ func scanContainers(p *AutoPrivilege) {
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		evidence = append(evidence, "kubernetes service env")
 	}
-	// Isolation hardening (R24): a container that shares the host PID
-	// namespace changes how EVERY other finding must be read (host init,
-	// host processes and their /proc data are in reach), and a privileged
-	// container (cap_sys_admin in CapEff) makes the classic breakouts
-	// trivial instead of "needs a reachable runtime". The parser of
-	// capabilities already exists (parseCapHex) — reused, not duplicated.
 	if data, err := os.ReadFile("/proc/self/status"); err == nil {
-		if ns := pidNamespaceFromStatus(string(data)); ns == "host" {
-			evidence = append(evidence, "host PID namespace visible (PID 1 is the host init)")
+		// FP-2: see the comment above — "own" is the only namespace verdict
+		// that belongs in container evidence.
+		if ns := pidNamespaceFromStatus(string(data)); ns == "own" {
+			evidence = append(evidence, "own PID namespace (NSpid lists multiple ids)")
 		}
 		if containerPrivilegeFromStatus(string(data)) == "privileged" {
 			evidence = append(evidence, "privileged caps (cap_sys_admin in CapEff)")
@@ -649,30 +1122,35 @@ func scanContainers(p *AutoPrivilege) {
 		}
 	}
 	if len(evidence) > 0 {
-		// Host init environment (R35): in a shared PID namespace,
-		// /proc/1 is the host init and its environ is a credential
-		// prize when readable. Only probed when other container
-		// evidence exists — on bare metal the host init's environ is
-		// readable to root and would fabricate a false container
-		// signal. The CONTENT is never printed: only the readability
-		// is declared. Permission-denied is the common case and
+		// Host init environment: in a shared PID namespace /proc/1 is the
+		// host init and its environ is a credential prize when readable.
+		// Only probed when other container evidence exists — on bare metal
+		// the host init's environ is readable to root and would fabricate a
+		// false container signal. The CONTENT is never printed: only the
+		// readability is declared. Permission-denied is the common case and
 		// stays silent.
 		if _, err := os.ReadFile("/proc/1/environ"); err == nil {
 			evidence = append(evidence, "host init environment readable (/proc/1/environ)")
 		}
-		risk := RiskMedium
+		// Context note, not a posture hit (audit INC-2): being in a normal
+		// container is the deployment's shape, not a misconfiguration —
+		// RiskSafe keeps a clean container's score at 100. A PRIVILEGED
+		// container is genuinely bad posture and stays HIGH informational.
+		risk := RiskSafe
 		if privileged {
-			// Honest escalation ladder: privileged = breakout is
-			// trivial, but it still needs a technique — the tool
-			// reports context, it does not pretend to escape.
 			risk = RiskHigh
 		}
 		addFinding(p, "CONTAINER", "self",
-			fmt.Sprintf("Running inside a container (%s) — breakout needs a reachable runtime socket or a privileged runtime",
+			fmt.Sprintf("Running inside a container (%s) — context note, not an escalation by itself; breakout needs a reachable runtime socket or privileged caps",
 				strings.Join(evidence, ", ")),
 			risk, false)
 	}
 
+	// The socket and daemon surfaces below are escalation paths — for root
+	// they are meaningless (audit FP-1).
+	if currentEUID() == 0 {
+		return
+	}
 	for _, sock := range canonicalSocketPaths(containerSocketPaths()) {
 		info, err := os.Lstat(sock)
 		if err != nil || info.Mode()&os.ModeSocket == 0 {
@@ -692,7 +1170,9 @@ func scanContainers(p *AutoPrivilege) {
 	// A docker CLI that actually reaches a daemon is a breakout vector on
 	// its own: it can start a privileged container mounting the host root.
 	// scanDocker covers group membership and the raw socket; this also
-	// covers DOCKER_HOST / oddly-permissioned setups.
+	// covers DOCKER_HOST / oddly-permissioned setups. dedupFindings drops
+	// this finding again when a DOCKER finding already covers the access
+	// (audit FP-9: one breakout path, one finding).
 	// Half the scan timeout (R28): on docker-less hosts this probe eats
 	// the full budget on every run for an answer that is always "no".
 	if out, err := runCmdOut(p.Opts.scanCmdTimeout()/2, "docker", "ps"); err == nil {
@@ -718,6 +1198,12 @@ func parseCapHex(s string) uint64 {
 }
 
 func scanCapabilities(p *AutoPrivilege) {
+	// Root guard (audit FP-1): "Process holds CAP_SETUID — can become root
+	// in-process" said to a root user is absurd; root starts with every
+	// capability the mask can hold.
+	if currentEUID() == 0 {
+		return
+	}
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", os.Getpid()))
 	if err != nil {
 		return
@@ -755,32 +1241,79 @@ func scanCapabilities(p *AutoPrivilege) {
 // --- File capabilities ---
 // scanFileCaps looks for binaries with file capabilities (e.g. cap_setuid+ep
 // on an interpreter) using getcap when available.
+// scanFileCaps looks for binaries with file capabilities (e.g. cap_setuid+ep
+// on an interpreter) using getcap when available.
 func scanFileCaps(p *AutoPrivilege) {
-	// getcap -r walks the whole filesystem: it is the slowest external call
-	// of the scan, so it gets 4x the configured timeout.
-	out, err := runCmdOut(4*p.Opts.scanCmdTimeout(), "getcap", "-r", "/usr", "/bin", "/sbin", "/opt")
-	if err != nil {
-		return // getcap missing or unreadable paths — skip silently
+	// Root guard (audit FP-1): file capabilities grant nothing root lacks.
+	if currentEUID() == 0 {
+		return
 	}
+	// getcap -r walks the whole filesystem: it is the slowest external call
+	// of the scan, so it gets 4x the configured timeout. /usr/local joins
+	// the roots — custom interpreters live there more often than in /usr.
+	out, err := runCmdOut(4*p.Opts.scanCmdTimeout(), "getcap", "-r", "/usr", "/bin", "/sbin", "/opt", "/usr/local")
+	if err != nil && len(out) == 0 {
+		return // getcap missing entirely — skip silently
+	}
+	// err != nil WITH output: getcap exits nonzero when parts of the tree
+	// are unreadable but still prints every capability it found — the
+	// findings stand (audit FN-1: the old code threw them all away).
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, "cap_setuid") {
+		if line == "" {
 			continue
 		}
-		fields := strings.SplitN(line, " =", 2)
-		if len(fields) != 2 {
+		binPath, caps, ok := parseGetcapLine(line)
+		if !ok {
 			continue
 		}
-		binPath := fields[0]
 		if _, err := os.Lstat(binPath); err != nil {
 			continue
 		}
-		addFinding(p, "CAPS", "cap_setuid:"+binPath,
-			fmt.Sprintf("cap_setuid on %s — interpreter can setuid(0)", binPath),
-			RiskMedium, true)
+		switch {
+		case strings.Contains(caps, "cap_setuid"):
+			addFinding(p, "CAPS", "cap_setuid:"+binPath,
+				fmt.Sprintf("cap_setuid on %s — interpreter can setuid(0) in-process", binPath),
+				RiskMedium, true)
+		case strings.Contains(caps, "cap_dac_read_search"):
+			addFinding(p, "CAPS", "cap_dac_read_search:"+binPath,
+				fmt.Sprintf("cap_dac_read_search on %s — reads any file (/etc/shadow included)", binPath),
+				RiskMedium, true)
+		case strings.Contains(caps, "cap_sys_admin"):
+			addFinding(p, "CAPS", "cap_sys_admin:"+binPath,
+				fmt.Sprintf("cap_sys_admin on %s — mount/namespace escape territory (verify)", binPath),
+				RiskMedium, false)
+		}
 	}
 }
 
+// parseGetcapLine tolerates BOTH getcap output formats (audit FN-1 — the
+// old SplitN(line, " =", 2) silently discarded every modern-format line):
+//
+//	modern libcap (>= 2.60):  /usr/bin/python3.10 cap_setuid=ep
+//	legacy:                   /usr/bin/foo = cap_setuid+ep
+//
+// A line without any cap_ token (stderr warnings that CombinedOutput mixed
+// in) is rejected. Paths containing spaces survive via the legacy branch.
+// Pure function — table-tested.
+func parseGetcapLine(line string) (path, caps string, ok bool) {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return "", "", false
+	}
+	for i := 0; i < len(fields); i++ {
+		tok := fields[i]
+		if tok == "=" && i >= 1 && i+1 < len(fields) {
+			return strings.Join(fields[:i], " "), fields[i+1], true
+		}
+		if strings.Contains(tok, "cap_") && i >= 1 {
+			return strings.Join(fields[:i], " "), tok, true
+		}
+	}
+	return "", "", false
+}
+
+// --- NFS ---
 // --- NFS ---
 func scanNFS(p *AutoPrivilege) {
 	data, err := os.ReadFile("/etc/exports")
@@ -793,23 +1326,62 @@ func scanNFS(p *AutoPrivilege) {
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
-		if strings.Contains(line, "no_root_squash") {
-			addFinding(p, "NFS", line,
-				"NFS export with no_root_squash — mount and own files as root",
-				RiskHigh, true)
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
 			continue
 		}
-		// no_root_squash is the worst case, but an rw export with an
-		// unrestricted client list is its quieter sibling: every host
-		// that can reach the port can mount and (with a matching uid)
-		// write. Config weakness, not a direct path for the current
-		// user — MEDIUM, informational.
-		if nfsExportHostless(line) {
+		reported := false
+		for _, client := range fields[1:] {
+			// FP-7: no_root_squash only matters on a WRITABLE export. The old
+			// substring match flagged read-only exports as "mount and own
+			// files as root" — on ro the attacker gets root-owned READS at
+			// best. exports(5) default is rw when neither rw nor ro is set,
+			// so "not ro" is the honest writability test.
+			_, ro, nrs := nfsClientOptions(client)
+			if !nrs || reported {
+				continue
+			}
+			if !ro {
+				addFinding(p, "NFS", line,
+					"NFS export rw + no_root_squash — mount remotely and own files as root",
+					RiskHigh, true)
+			} else {
+				addFinding(p, "NFS", line,
+					"NFS export ro + no_root_squash — root-owned reads over NFS only, no file takeover",
+					RiskLow, false)
+			}
+			reported = true // one finding per export line keeps the report honest
+		}
+		if !reported && nfsExportHostless(line) {
 			addFinding(p, "NFS", line,
 				"NFS export rw without host restriction — any client may mount",
 				RiskMedium, false)
 		}
 	}
+}
+
+// nfsClientOptions parses one client spec — "(rw,no_root_squash)",
+// "*(ro,no_root_squash)", "192.168.1.0/24(rw)" — into its security-relevant
+// flags. The option group is the LAST parenthesized chunk, so both the
+// bare "(rw,...)" form and any host-qualified "host(rw,...)" form parse.
+// Pure function — table-tested.
+func nfsClientOptions(client string) (rw, ro, noRootSquash bool) {
+	i := strings.LastIndex(client, "(")
+	if i < 0 || !strings.HasSuffix(client, ")") {
+		return false, false, false
+	}
+	s := client[i+1 : len(client)-1]
+	for _, opt := range strings.Split(s, ",") {
+		switch strings.TrimSpace(opt) {
+		case "rw":
+			rw = true
+		case "ro":
+			ro = true
+		case "no_root_squash":
+			noRootSquash = true
+		}
+	}
+	return
 }
 
 // nfsExportHostless reports whether an /etc/exports line grants rw to an
@@ -858,23 +1430,58 @@ func nfsExportHostless(line string) bool {
 // to. The old version tested the OWNER's write bit (`perm&0200`), which
 // flagged root-owned 755 directories as "writable binary planting" — a false
 // positive the Director reproduced live (honest results demand real access).
+// --- Writable PATH entries ---
+// scanWritablePath flags PATH directories the CURRENT USER can really write
+// to. The old version tested the OWNER's write bit (`perm&0200`), which
+// flagged root-owned 755 directories as "writable binary planting" — a false
+// positive the Director reproduced live (honest results demand real access).
 func scanWritablePath(p *AutoPrivilege) {
 	// Running as root, nothing in PATH can escalate further: every
 	// directory is "writable" and every finding would be noise.
-	if os.Geteuid() == 0 {
+	if currentEUID() == 0 {
 		return
 	}
-
-	for _, dir := range strings.Split(os.Getenv("PATH"), ":") {
+	dirs := strings.Split(os.Getenv("PATH"), ":")
+	// Audit FN-5: /etc/environment carries the PAM-level PATH that LOGIN
+	// sessions use — docker exec and cron never source it, so the process
+	// env alone misses exactly the directory a future login will trust.
+	if data, err := os.ReadFile("/etc/environment"); err == nil {
+		dirs = append(dirs, envPathDirs(string(data))...)
+	}
+	seen := map[string]bool{}
+	for _, dir := range dirs {
 		if dir == "" {
 			dir = "."
 		}
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
 		if planting, owner := isPathPlantingDir(dir); planting {
 			addFinding(p, "PATH", dir,
 				"Writable directory in PATH (owner uid "+owner+") — binary planting",
 				RiskHigh, true)
 		}
 	}
+}
+
+// envPathDirs parses PATH assignments out of /etc/environment content
+// (PATH="..." or PATH=...). Pure function — table-tested.
+func envPathDirs(content string) []string {
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "PATH=") {
+			continue
+		}
+		v := strings.Trim(strings.TrimPrefix(line, "PATH="), "\"'")
+		for _, dir := range strings.Split(v, ":") {
+			if dir != "" {
+				out = append(out, dir)
+			}
+		}
+	}
+	return out
 }
 
 // isPathPlantingDir reports whether dir is a binary-planting bait: a
@@ -951,7 +1558,15 @@ var servicePaths = struct {
 // scanServices covers the two service-execution families the current user
 // must never be able to rewrite: systemd units (systemd) and SysV init
 // scripts (init.d). Both run as root — at boot, on restart, on timer fire.
+// scanServices covers the two service-execution families the current user
+// must never be able to rewrite: systemd units (systemd) and SysV init
+// scripts (init.d). Both run as root — at boot, on restart, on timer fire.
 func scanServices(p *AutoPrivilege) {
+	// Root guard (audit FP-1): as root every unit file is writable and the
+	// scanner reports a pristine host as 21 HIGH/DANGER findings.
+	if currentEUID() == 0 {
+		return
+	}
 	scanServicesWithPaths(p, servicePaths.systemd, servicePaths.initd)
 }
 
@@ -1030,6 +1645,94 @@ func kernelInRange(v, minV, maxV []int) bool {
 	return cmp(v, minV) >= 0 && cmp(v, maxV) <= 0
 }
 
+// kernelCVEEntry is one version-range heuristic. ranges is a list of
+// [min,max] pairs (inclusive, OR-ed) so multi-range CVEs fit — INC-1:
+// StackRot (CVE-2023-3269, never 32629) affects 6.1.0-6.1.36 AND
+// 6.2.0-6.3.10; the old single range 6.1.0-6.1.13 hid 6.1.14+ and all of
+// 6.2/6.3 behind a wrong CVE id.
+type kernelCVEEntry struct {
+	cve    string
+	name   string
+	desc   string
+	ranges [][]int
+	risk   RiskLevel
+}
+
+// kernelCVEDB returns the heuristic table. Every entry is exploitable=false
+// by policy (audit FP-4): version ranges cannot see distro backports, so a
+// match is a VERIFY lead, never confirmed surface — it must not trip
+// --fail-on, --min-score or the auto-exploit pipeline.
+func kernelCVEDB() []kernelCVEEntry {
+	return []kernelCVEEntry{
+		{
+			cve:  "CVE-2022-0847",
+			name: "Dirty Pipe",
+			desc: "kernel pipe buffer flag overwrite — read/write any file as root",
+			ranges: [][]int{
+				{5, 8, 0, 5, 16, 10},
+			},
+			risk: RiskHigh,
+		},
+		{
+			// The canonical legacy/CTF vector: the fix landed in 4.8.3
+			// (also backported to 4.7.9 and 4.4.26), so the conservative
+			// window is 2.6.22 through 4.8.3 — on any modern kernel this
+			// never fires, which keeps it free of noise (R29).
+			cve:  "CVE-2016-5195",
+			name: "Dirty Cow",
+			desc: "mm/gup race in copy-on-write — write to read-only mappings, root any legacy host",
+			ranges: [][]int{
+				{2, 6, 22, 4, 8, 3},
+			},
+			risk: RiskHigh,
+		},
+		{
+			cve:  "CVE-2023-0386",
+			name: "OverlayFS",
+			desc: "overlayfs copy-up permission bypass — file ownership escalation",
+			ranges: [][]int{
+				{5, 11, 0, 6, 2, 0},
+			},
+			risk: RiskHigh,
+		},
+		{
+			// INC-1: correct id (3269, StackRot) and BOTH affected windows:
+			// fixed upstream in 6.1.37 and 6.3.11.
+			cve:  "CVE-2023-3269",
+			name: "StackRot",
+			desc: "kernel 6.1-6.3 VMA stack expansion race — local privilege escalation",
+			ranges: [][]int{
+				{6, 1, 0, 6, 1, 36},
+				{6, 2, 0, 6, 3, 10},
+			},
+			risk: RiskMedium,
+		},
+		{
+			cve:  "CVE-2024-1086",
+			name: "nf_tables UAF",
+			desc: "netfilter use-after-free — local privilege escalation",
+			ranges: [][]int{
+				{5, 14, 0, 6, 6, 13},
+			},
+			risk: RiskHigh,
+		},
+	}
+}
+
+// versionInAnyRange reports whether v falls inside any [min,max] pair of
+// the ranges list. Each pair is a flat 6-int slice (major,minor,patch twice).
+func versionInAnyRange(v []int, ranges [][]int) bool {
+	for _, r := range ranges {
+		if len(r) != 6 {
+			continue
+		}
+		if kernelInRange(v, r[0:3], r[3:6]) {
+			return true
+		}
+	}
+	return false
+}
+
 func scanKernelCVE(p *AutoPrivilege) {
 	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "uname", "-r")
 	if err != nil {
@@ -1037,75 +1740,30 @@ func scanKernelCVE(p *AutoPrivilege) {
 	}
 	kernel := strings.TrimSpace(string(out))
 	kv := kernelVersion(kernel)
-
-	cves := []struct {
-		cve  string
-		name string
-		desc string
-		minV []int
-		maxV []int
-		risk RiskLevel
-	}{
-		{
-			cve:  "CVE-2022-0847",
-			name: "Dirty Pipe",
-			desc: "kernel pipe buffer flag overwrite — read/write any file as root",
-			minV: []int{5, 8, 0},
-			maxV: []int{5, 16, 10},
-			risk: RiskHigh,
-		},
-		{
-			// The canonical legacy/CTF vector: the fix landed in
-			// 4.8.3 (also backported to 4.7.9 and 4.4.26), so the
-			// conservative window is 2.6.22 through 4.8.3 — on
-			// any modern kernel this never fires, which keeps it
-			// free of noise (R29).
-			cve:  "CVE-2016-5195",
-			name: "Dirty Cow",
-			desc: "mm/gup race in copy-on-write — write to read-only mappings, root any legacy host",
-			minV: []int{2, 6, 22},
-			maxV: []int{4, 8, 3},
-			risk: RiskHigh,
-		},
-		{
-			cve:  "CVE-2023-0386",
-			name: "OverlayFS",
-			desc: "overlayfs copy-up permission bypass — file ownership escalation",
-			minV: []int{5, 11, 0},
-			maxV: []int{6, 2, 0},
-			risk: RiskHigh,
-		},
-		{
-			cve:  "CVE-2023-32629",
-			name: "StackRot",
-			desc: "kernel 6.1 VMA stack expansion race — local privilege escalation",
-			minV: []int{6, 1, 0},
-			maxV: []int{6, 1, 13},
-			risk: RiskMedium,
-		},
-		{
-			cve:  "CVE-2024-1086",
-			name: "nf_tables UAF",
-			desc: "netfilter use-after-free — local privilege escalation",
-			minV: []int{5, 14, 0},
-			maxV: []int{6, 6, 13},
-			risk: RiskHigh,
-		},
-	}
-
-	for _, cve := range cves {
-		if kernelInRange(kv, cve.minV, cve.maxV) {
-			addFinding(p, "KERNEL", cve.cve,
-				fmt.Sprintf("Kernel %s in affected range for %s (%s) — verify before use (heuristic, backports may patch it)",
-					kernel, cve.name, cve.cve),
-				cve.risk, true)
+	for _, cve := range kernelCVEDB() {
+		if !versionInAnyRange(kv, cve.ranges) {
+			continue
 		}
+		// FP-4: heuristic findings are informational, always. The text says
+		// exactly how to verify before burning time on an exploit that a
+		// distro backport already defused.
+		addFinding(p, "KERNEL", cve.cve,
+			fmt.Sprintf("Kernel %s in affected range for %s (%s) — %s. Version heuristic only: distro backports may already patch it; verify (e.g. `ubuntu.com/security/CVEs`, `apt changelog linux`) before use",
+				kernel, cve.name, cve.cve, cve.desc),
+			cve.risk, false)
 	}
 }
 
 // --- PwnKit ---
 // scanPwnKit checks for a SUID pkexec binary (CVE-2021-4034 affects polkit,
 // not the kernel — the old code matched it against kernel versions).
+// --- PwnKit ---
+// scanPwnKit checks for a SUID pkexec binary (CVE-2021-4034 affects polkit,
+// not the kernel — the old code matched it against kernel versions).
+// Audit FP-3: every SUID pkexec on earth matched "HIGH exploitable" even
+// though every current distro has shipped the 2022 patch years ago. The
+// honest classification is an informational lead: verify the package patch
+// level before treating it as a vector.
 func scanPwnKit(p *AutoPrivilege) {
 	info, err := os.Lstat("/usr/bin/pkexec")
 	if err != nil || info.Mode()&os.ModeSetuid == 0 {
@@ -1116,14 +1774,20 @@ func scanPwnKit(p *AutoPrivilege) {
 		version = strings.TrimSpace(string(out))
 	}
 	addFinding(p, "KERNEL", "CVE-2021-4034",
-		fmt.Sprintf("SUID pkexec present (%s) — PwnKit polkit LPE candidate (patched pkexec may still match)",
+		fmt.Sprintf("SUID pkexec present (%s) — PwnKit candidate; all current distros ship the 2022 patch, verify the package level (e.g. `dpkg -l policykit-1`) before use",
 			version),
-		RiskHigh, true)
+		RiskLow, false)
 }
 
 // --- sudo version ---
 // scanSudoVersion flags old sudo builds vulnerable to Baron Samedit
 // (CVE-2021-3156, fixed in 1.9.5p2) — a sudo bug, not a kernel one.
+// --- sudo version ---
+// scanSudoVersion flags old sudo builds vulnerable to Baron Samedit
+// (CVE-2021-3156, fixed in 1.9.5p2) — a sudo bug, not a kernel one.
+// Version comparison alone cannot see distro backports (Ubuntu 20.04's
+// 1.8.31-1ubuntu1.2 is patched but "older"), so the finding is an
+// informational lead with the verification step spelled out.
 func scanSudoVersion(p *AutoPrivilege) {
 	out, err := runCmdOut(p.Opts.scanCmdTimeout(), "sudo", "--version")
 	if err != nil {
@@ -1137,8 +1801,8 @@ func scanSudoVersion(p *AutoPrivilege) {
 		ver := strings.TrimSpace(strings.TrimPrefix(line, "Sudo version "))
 		if sudoVersionOlder(ver, "1.9.5p2") {
 			addFinding(p, "KERNEL", "CVE-2021-3156",
-				fmt.Sprintf("sudo %s older than 1.9.5p2 — Baron Samedit heap overflow candidate", ver),
-				RiskHigh, true)
+				fmt.Sprintf("sudo %s older than 1.9.5p2 — Baron Samedit heap overflow candidate; distros backported the fix, verify the package version (`dpkg -l sudo`) before use", ver),
+				RiskMedium, false)
 		}
 		break
 	}
@@ -1196,6 +1860,11 @@ var preloadPaths = struct {
 // uid 0). Content is never printed — presence and entry count only —
 // mirroring the credential scanners' "presence, not contents" rule.
 func scanPreload(p *AutoPrivilege) {
+	// Root guard (audit FP-1): the preload/sudoers surfaces are root's own
+	// configuration — a root run would flag them all "writable".
+	if currentEUID() == 0 {
+		return
+	}
 	scanPreloadPaths(p, preloadPaths.preload, preloadPaths.sudoers, preloadPaths.sudoersDir)
 	scanLoaderPath(p, preloadPaths.conf, preloadPaths.confD)
 }
@@ -1331,7 +2000,7 @@ var loginHookPaths = struct {
 // help), so it short-circuits like scanWritablePath — without the guard
 // every check would trip and the finding would be pure noise.
 func scanGroup(p *AutoPrivilege) {
-	if os.Geteuid() == 0 {
+	if currentEUID() == 0 {
 		return
 	}
 	if !isWritableByCurrentUser(groupPath) {
@@ -1350,6 +2019,11 @@ func scanGroup(p *AutoPrivilege) {
 // the payload is a plain append, no compilation, no schedule, no waiting
 // for a misconfiguration — only for the next login.
 func scanLoginHooks(p *AutoPrivilege) {
+	// Root guard (audit FP-1): every login hook is writable for root on a
+	// pristine host — pure noise from a privileged scan.
+	if currentEUID() == 0 {
+		return
+	}
 	if info, err := os.Lstat(loginHookPaths.environment); err == nil && info.Mode().IsRegular() {
 		if isWritableByCurrentUser(loginHookPaths.environment) {
 			addFinding(p, "HOOKS", loginHookPaths.environment,
@@ -1388,8 +2062,129 @@ func scanLoginHookPath(p *AutoPrivilege, path string, isDir bool, desc string) {
 func scanCredentials(p *AutoPrivilege) {
 	scanSSHKeys(p)
 	scanConfigPasswords(p)
+	scanCustomConfigs(p)
 	scanHistoryFiles(p)
 	scanCloudMetadata(p)
+}
+
+// customConfigRoots are walked (depth-bounded) for credential-bearing
+// config files in locations that are neither /etc services nor the classic
+// dotfile set — audit FN-5: /opt/custom/db.conf and .env-style secrets
+// were invisible because /opt was not on any scan list.
+var customConfigRoots = []string{"/opt", "/srv", "/var/www"}
+
+// customConfigSuffixes select which files get content-checked.
+var customConfigSuffixes = []string{".env", ".conf", ".ini", ".cfg", ".cnf", ".yaml", ".yml"}
+
+// customConfigSkipDirs are noise trees never descended into.
+var customConfigSkipDirs = map[string]bool{
+	"node_modules": true, ".git": true, ".cache": true, ".npm": true,
+	".local": true, ".config": true, "site-packages": true, "vendor": true,
+	"__pycache__": true, ".venv": true, "venv": true,
+}
+
+// credPlaceholderValues are obvious non-secrets that still match the
+// assignment patterns (documentation examples, templates).
+var credPlaceholderValues = map[string]bool{
+	"changeme": true, "change_me": true, "example": true, "placeholder": true,
+	"xxx": true, "xxxx": true, "xxxxx": true, "dummy": true, "sample": true,
+	"your_password": true, "<password>": true, "password": true, "test": true,
+	"secret": true, "none": true, "null": true, "true": true, "false": true,
+	"notset": true, "redacted": true, "todo": true, "fixme": true,
+}
+
+const (
+	maxCustomConfigDepth = 3
+	maxCustomConfigBytes = 1 << 20
+)
+
+// scanCustomConfigs sweeps the custom roots (plus $HOME, shallow) for
+// readable config files containing credential assignments.
+func scanCustomConfigs(p *AutoPrivilege) {
+	roots := append([]string{}, customConfigRoots...)
+	if home := os.Getenv("HOME"); home != "" && home != "/root" {
+		roots = append(roots, home)
+	}
+	for _, root := range roots {
+		walkCustomConfigs(p, root, 0)
+	}
+}
+
+func walkCustomConfigs(p *AutoPrivilege, dir string, depth int) {
+	if depth > maxCustomConfigDepth {
+		return
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		if e.IsDir() {
+			if !customConfigSkipDirs[e.Name()] {
+				walkCustomConfigs(p, full, depth+1)
+			}
+			continue
+		}
+		if e.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		name := strings.ToLower(e.Name())
+		match := name == ".env" || strings.HasPrefix(name, ".env.")
+		if !match {
+			for _, suf := range customConfigSuffixes {
+				if strings.HasSuffix(name, suf) {
+					match = true
+					break
+				}
+			}
+		}
+		if !match {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() > maxCustomConfigBytes {
+			continue
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			continue
+		}
+		if label := credentialAssignmentMatch(string(data)); label != "" {
+			addFinding(p, "CRED", full,
+				fmt.Sprintf("Credential assignment in %s (%s) — readable secret, verify scope and rotate", full, label),
+				RiskMedium, true)
+		}
+	}
+}
+
+// credAssignRes are line-anchored assignment patterns for config files.
+var credAssignRes = []struct {
+	label string
+	re    *regexp.Regexp
+}{
+	{"password", regexp.MustCompile(`(?im)^\s*[a-z0-9_]*(?:password|passwd|pwd)[\t ]*[=:][\t ]*["']?([^\s"']{3,})`)},
+	{"redis requirepass", regexp.MustCompile(`(?im)^\s*requirepass[\t ]+([^\s]{3,})`)},
+	{"secret/key", regexp.MustCompile(`(?im)^\s*(?:api_?key|secret|secret_?key|client_?secret|private_?key)[\t ]*[=:][\t ]*["']?([^\s"']{3,})`)},
+	{"token", regexp.MustCompile(`(?im)^\s*(?:token|access_?token|auth_?token)[\t ]*[=:][\t ]*["']?([^\s"']{3,})`)},
+	{"aws key", regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
+}
+
+// credentialAssignmentMatch returns the label of the first real (non-
+// placeholder, non-template) credential assignment found. Pure function.
+func credentialAssignmentMatch(content string) string {
+	for _, pat := range credAssignRes {
+		for _, m := range pat.re.FindAllStringSubmatch(content, -1) {
+			v := strings.ToLower(strings.Trim(m[1], "\"'"))
+			if strings.HasPrefix(v, "${") || strings.HasPrefix(v, "$(") {
+				continue // template reference, not a literal secret
+			}
+			if !credPlaceholderValues[v] {
+				return pat.label
+			}
+		}
+	}
+	return ""
 }
 
 func scanSSHKeys(p *AutoPrivilege) {
@@ -1524,6 +2319,38 @@ func scanConfigFile(p *AutoPrivilege, path, pattern, desc string) {
 	addFinding(p, "CRED", path, desc, RiskMedium, true)
 }
 
+// historySecretRes are the context-aware secret patterns for shell history
+// (audit FP-6). Substring fishing over "password|secret|token|private"
+// flagged benign prose like `echo rotate password quarterly` or
+// `grep -rn token ./src` as HIGH exploitable; every pattern below demands
+// assignment or usage context instead. Findings are MEDIUM informational:
+// a lead to review and purge, never confirmed credentials.
+var historySecretRes = []struct {
+	label string
+	re    *regexp.Regexp
+}{
+	{"password assignment", regexp.MustCompile(`(?i)(?:^|[^a-z0-9])[a-z0-9_]*(?:password|passwd|pwd)[\t ]*[=:][\t ]*["']?[^\s"']{3,}`)},
+	{"redis requirepass", regexp.MustCompile(`(?im)^\s*requirepass[\t ]+\S{3,}`)},
+	{"secret/token/api-key assignment", regexp.MustCompile(`(?i)\b(?:secret|api_?key|access_?key|client_?secret|secret_?key)\s*[=:]\s*["']?[^\s"']{3,}`)},
+	{"token assignment", regexp.MustCompile(`(?i)\btoken\s*[=:]\s*["']?[^\s"']{3,}`)},
+	{"password flag with value", regexp.MustCompile(`(?i)(?:--password(?:=|\s+)\S+|-p\s*["'][^"']{3,}["'])`)},
+	{"aws access key id", regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
+	{"aws secret key assignment", regexp.MustCompile(`(?i)aws_secret_access_key\s*=\s*\S+`)},
+	{"private key block", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
+}
+
+// historySecretMatches returns the labels of every pattern that hits the
+// content. Pure function — table-tested with benign and malicious lines.
+func historySecretMatches(content string) []string {
+	var found []string
+	for _, pat := range historySecretRes {
+		if pat.re.MatchString(content) {
+			found = append(found, pat.label)
+		}
+	}
+	return found
+}
+
 func scanHistoryFiles(p *AutoPrivilege) {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -1549,17 +2376,12 @@ func scanHistoryFiles(p *AutoPrivilege) {
 			continue
 		}
 		content := string(data)
-		secrets := []string{"password", "passwd", "secret", "token", "api_key", "aws_", "AKIA", "private"}
-		found := []string{}
-		for _, s := range secrets {
-			if strings.Contains(strings.ToLower(content), s) {
-				found = append(found, s)
-			}
-		}
+		found := historySecretMatches(content)
 		if len(found) > 0 {
 			addFinding(p, "CRED", hf,
-				fmt.Sprintf("History file with potential secrets: %s", strings.Join(found, ", ")),
-				RiskHigh, true)
+				fmt.Sprintf("History file with potential secrets (%s) — review and purge; leads, not confirmed credentials",
+					strings.Join(found, ", ")),
+				RiskMedium, false)
 		}
 	}
 }

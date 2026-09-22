@@ -13,7 +13,7 @@ import (
 // floor (exit 3 with the score-gate message), stays silent when the score
 // clears it, and is disabled at 0 (the zero-value contract).
 func TestMinScoreGate(t *testing.T) {
-	// penalty: exploitable MEDIUM (4*3/2 = 6) + informational HIGH (7) = 13 → score 87
+	// v2.0 penalty: exploitable MEDIUM (6) + informational HIGH (3) = 9 → score 91
 	findings := []Finding{
 		{Source: "SUID", Risk: RiskMedium, Exploitable: true},
 		{Source: "NOTE", Risk: RiskHigh, Exploitable: false},
@@ -21,16 +21,16 @@ func TestMinScoreGate(t *testing.T) {
 	mk := func(min int) *AutoPrivilege {
 		return &AutoPrivilege{Opts: Options{MinScore: min}, Findings: findings}
 	}
-	if code, msg := computeExitCode(mk(90)); code != 3 || !strings.Contains(msg, "score gate: hardening score 87 < 90") {
+	if code, msg := computeExitCode(mk(92)); code != 3 || !strings.Contains(msg, "score gate: hardening score 91 < 92") {
 		t.Errorf("score below floor: got (%d, %q)", code, msg)
 	}
-	if code, _ := computeExitCode(mk(88)); code != 3 {
+	if code, _ := computeExitCode(mk(92)); code != 3 {
 		t.Errorf("score just below floor must trip, got %d", code)
 	}
-	if code, msg := computeExitCode(mk(87)); code != 0 || msg != "" {
+	if code, msg := computeExitCode(mk(91)); code != 0 || msg != "" {
 		t.Errorf("score exactly at floor must NOT trip (gate is score < floor): got (%d, %q)", code, msg)
 	}
-	if code, msg := computeExitCode(mk(86)); code != 0 || msg != "" {
+	if code, msg := computeExitCode(mk(90)); code != 0 || msg != "" {
 		t.Errorf("score above floor: got (%d, %q), want (0, \"\")", code, msg)
 	}
 	if code, _ := computeExitCode(mk(0)); code != 0 {
@@ -153,7 +153,7 @@ func TestCompletionUnknownShell(t *testing.T) {
 // WIN* scanners + cross-platform build). Pinning it here so a revert is
 // deliberate — the version is part of the report envelope consumers diff.
 func TestVersionPinnedTo190(t *testing.T) {
-	if Version != "1.9.0" {
-		t.Errorf("Version = %q, want 1.9.0", Version)
+	if Version != "2.0.0" {
+		t.Errorf("Version = %q, want 2.0.0", Version)
 	}
 }

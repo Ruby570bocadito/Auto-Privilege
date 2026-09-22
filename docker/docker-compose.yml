@@ -3,7 +3,9 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.28.0.0/16
+        # Override when 172.28.0.0/16 collides with an existing lab network:
+        #   AUTOPRIV_SUBNET=172.30.0.0/16 docker compose up -d
+        - subnet: ${AUTOPRIV_SUBNET:-172.28.0.0/16}
 
 services:
   # Vulnerable system — full attack surface (10 deliberate flaws)
@@ -16,7 +18,7 @@ services:
       - autoprivilege-test
     privileged: true
 
-  # Clean system — no vulnerabilities, should find nothing
+  # Clean system — no vulnerabilities; must report ZERO exploitable findings
   clean:
     build:
       context: ..
@@ -25,7 +27,7 @@ services:
     networks:
       - autoprivilege-test
 
-  # Edge cases system — tricky configurations
+  # Edge cases system — 8 tricky configurations, all must be detected
   edgecases:
     build:
       context: ..

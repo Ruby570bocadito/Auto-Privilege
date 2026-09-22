@@ -21,15 +21,15 @@ func TestFindingPenaltyWeights(t *testing.T) {
 		f    Finding
 		want int
 	}{
-		{Finding{Risk: RiskSafe, Exploitable: true}, 0},   // SAFE is never a hit
-		{Finding{Risk: RiskLow, Exploitable: true}, 3},    // 2 * 1.5
-		{Finding{Risk: RiskLow, Exploitable: false}, 2},   //
-		{Finding{Risk: RiskMedium, Exploitable: true}, 6}, // 4 * 1.5
-		{Finding{Risk: RiskMedium, Exploitable: false}, 4},
-		{Finding{Risk: RiskHigh, Exploitable: true}, 10}, // 7 * 1.5 = 10.5 → 10
-		{Finding{Risk: RiskHigh, Exploitable: false}, 7},
-		{Finding{Risk: RiskDanger, Exploitable: true}, 15}, // 10 * 1.5
-		{Finding{Risk: RiskDanger, Exploitable: false}, 10},
+		{Finding{Risk: RiskSafe, Exploitable: true}, 0}, // SAFE is never a hit
+		{Finding{Risk: RiskLow, Exploitable: true}, 3},  // v2.0 table
+		{Finding{Risk: RiskLow, Exploitable: false}, 1}, //
+		{Finding{Risk: RiskMedium, Exploitable: true}, 6},
+		{Finding{Risk: RiskMedium, Exploitable: false}, 2},
+		{Finding{Risk: RiskHigh, Exploitable: true}, 10},
+		{Finding{Risk: RiskHigh, Exploitable: false}, 3},
+		{Finding{Risk: RiskDanger, Exploitable: true}, 15},
+		{Finding{Risk: RiskDanger, Exploitable: false}, 5},
 	}
 	for _, c := range cases {
 		if got := findingPenalty(c.f); got != c.want {
@@ -45,7 +45,7 @@ func TestHardeningScoreDeterministicAndClamped(t *testing.T) {
 		{Source: "B", Risk: RiskMedium, Exploitable: false},
 		{Source: "C", Risk: RiskLow, Exploitable: true},
 	}
-	want := 100 - 10 - 4 - 3 // 83
+	want := 100 - 10 - 2 - 3 // 85
 	if got := hardeningScore(findings); got != want {
 		t.Errorf("hardeningScore = %d, want %d", got, want)
 	}
@@ -75,7 +75,7 @@ func TestBuildSummaryIncludesScore(t *testing.T) {
 		{Source: "CRED", Target: "/x", Risk: RiskLow, Exploitable: false},
 	}
 	s := buildSummary(p)
-	if want := 100 - 15 - 2; s.Score != want {
+	if want := 100 - 15 - 1; s.Score != want {
 		t.Errorf("summary.Score = %d, want %d", s.Score, want)
 	}
 }
@@ -120,7 +120,7 @@ func TestDiffReportsComputesScoreAfter(t *testing.T) {
 		{Source: "CRED", Target: "/x", Risk: RiskLow, Exploitable: false},
 	}
 	d := diffReports(before, current)
-	if want := 100 - 2; d.ScoreAfter != want {
+	if want := 100 - 1; d.ScoreAfter != want {
 		t.Errorf("diff.ScoreAfter = %d, want %d", d.ScoreAfter, want)
 	}
 }
