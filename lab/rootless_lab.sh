@@ -41,7 +41,7 @@ fi
 command -v unshare >/dev/null || { echo "unshare not available"; exit 1; }
 
 echo "[lab] building binary..." >&2
-( cd "$PROJECT_DIR" && go build -o "$BIN" . )
+( cd "$PROJECT_DIR" && go build -o "$BIN" ./cmd/autoprivilege )
 
 echo "[lab] staging fake vulnerable system..." >&2
 STAGE=$(mktemp -d /tmp/ap-lab.XXXXXX)

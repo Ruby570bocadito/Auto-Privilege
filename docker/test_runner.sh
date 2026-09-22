@@ -28,7 +28,7 @@ mkdir -p "$RESULTS_DIR"
 # 1. Build + unit tests
 # ---------------------------------------------------------------
 log "Building binary..."
-( cd "$PROJECT_DIR" && go build -o "$BIN" . ) || { fail "build"; exit 1; }
+( cd "$PROJECT_DIR" && go build -o "$BIN" ./cmd/autoprivilege ) || { fail "build"; exit 1; }
 pass "binary built: $BIN"
 
 log "Running unit tests..."

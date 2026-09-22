@@ -2,7 +2,7 @@
 
 <h1 align="center">AUTOPRIV</h1>
 
-<p align="center"><b>Automated Linux privilege escalation suite — scan, enumerate, auto-root.</b><br>
+<p align="center"><b>Automated Linux + Windows privilege escalation suite — scan, enumerate, auto-root.</b><br>
 One Go binary. Zero dependencies. Honest results.</p>
 
 <p align="center">
@@ -30,11 +30,12 @@ Everything is deliberate about its honesty. Vectors it cannot verify automatical
 
 | | |
 |---|---|
-| **20 read-only scanners** | SUID/SGID, sudo rules + version, writable cron (+ wildcard-injection candidates), passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS (no_root_squash + hostless-rw exports), writable PATH dirs, systemd units AND init.d scripts, kernel CVEs, credentials in history/configs, cloud metadata, `ld.so.preload` + writable `ld.so.conf(.d)`, writable sudoers (file, dir and per-file drop-ins), writable `/etc/group`, writable login hooks (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`), writable polkit policy surfaces (`rules.d`, `.rules` files, `localauthority` dirs) |
+| **Linux: 20 read-only scanners** | SUID/SGID, sudo rules + version, writable cron (+ wildcard-injection candidates), passwd/shadow injection, docker group, container runtime context (podman/containerd/docker daemon), capabilities (both bitmask and file caps), NFS (no_root_squash + hostless-rw exports), writable PATH dirs, systemd units AND init.d scripts, kernel CVEs, credentials in history/configs, cloud metadata, `ld.so.preload` + writable `ld.so.conf(.d)`, writable sudoers (file, dir and per-file drop-ins), writable `/etc/group`, writable login hooks (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`), writable polkit policy surfaces (`rules.d`, `.rules` files, `localauthority` dirs) |
+| **Windows: 8 read-only scanners (v1.9)** | token privileges (SeImpersonate → potato family, SeBackup, SeDebug — Priv2Admin primitives), UAC-filtered-admin surface, registry misconfigurations (AlwaysInstallElevated, plaintext AutoLogon, EnableLUA), service attack surface (unquoted paths with spaces, user-writable binary dirs, SYSTEM services running user-profile binaries), autorun keys, scheduled tasks with writable commands, credential artifacts (unattend/sysprep, GPP cpassword, PowerShell history, cloud/SSH keys), PATH hijacks |
 | **75 GTFOBins techniques + 31 sgid** | embedded in the binary — works air-gapped; refreshable from upstream with one command (`--list-gtfo` shows the sgid section) |
 | **Hardening score** | every scan ends with a deterministic 0–100 posture number — weighted by risk and exploitability — so `--baseline` diffs read `score 60 → 85` instead of raw counts |
 | **Hardening playbook** | `--explain cron` (or `all`) prints the exact remediation steps per finding source; `--report` embeds a `## Hardening plan` section built from the sources actually detected |
-| **Safest-first auto-exploit** | techniques sorted by risk, `--risk` cap, `--one-shot` stop at first root |
+| **Safest-first auto-exploit** | Linux: techniques sorted by risk, `--risk` cap, `--one-shot` stop at first root. Windows (v1.9): read-only enumeration with the exact manual command per technique (`--dry-run` shows the plan) |
 | **Five output formats** | human terminal with truecolor ramp, `--json` for machines (`--output file` persists it, 0600), markdown `--report` with evidence, self-contained `--html` page for stakeholders, and `--sarif` for GitHub/GitLab code-scanning dashboards |
 | **Machine-readable catalogs** | `--list-vectors --json`, `--list-sources` (text or `--json`) and `--explain cron --json` speak the same envelope (`tool`/`version`/`mode`) so dashboards can ingest the vocabulary the binary itself uses — canonical order, zero hardcoded drift |
 | **Two CI gates → three** | `--fail-on risk` fails when the surface EXISTS at/above a risk; `--fail-on-new` (optional threshold: `--fail-on-new=high`) fails only when it GROWS — the regression verdict for progressive-hardening pipelines; `--min-score n` fails while the posture number sits under the floor |
@@ -55,21 +56,28 @@ The whole pipeline, one glance:
 
 ## Quick start
 
-**Download a release binary** (linux amd64 / arm64, statically linked):
+**Download a release binary** (linux amd64/arm64, windows amd64/arm64 — statically linked, see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full requirements matrix):
 
 ```bash
+# Linux
 curl -LO https://github.com/Ruby570bocadito/Auto-Privilege/releases/latest/download/autoprivilege-linux-amd64
 chmod +x autoprivilege-linux-amd64 && mv autoprivilege-linux-amd64 autoprivilege
 ./autoprivilege --help
 ```
 
-**Or build from source** (Go 1.26+, no module dependencies to fetch):
+```powershell
+# Windows 10 1809+ / Server 2019+
+curl -LO https://github.com/Ruby570bocadito/Auto-Privilege/releases/latest/download/autoprivilege-windows-amd64.exe
+.\autoprivilege-windows-amd64.exe --help
+```
+
+**Or build from source** (Go 1.26+, no module dependencies to fetch — cross-compiles to every target from any OS):
 
 ```bash
 git clone https://github.com/Ruby570bocadito/Auto-Privilege.git
 cd Auto-Privilege
-go build -o autoprivilege .
-./autoprivilege
+go build -o autoprivilege ./cmd/autoprivilege              # native
+GOOS=windows go build -o autoprivilege.exe ./cmd/autoprivilege   # windows cross-compile
 ```
 
 **Or just try it in the safe lab first:**
@@ -174,9 +182,35 @@ Not sure what `--vector` accepts? `--list-vectors` prints the catalog — every 
 | `hooks` | writable login-time hooks: `/etc/environment` (LD_PRELOAD into every session), `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc` | manual |
 | `polkit` | writable polkit policy surfaces: `rules.d` directory (auto — plants a temporary `00-` rule granting `org.freedesktop.policykit.exec`, runs `pkexec`, removes the rule), writable `.rules` file or `localauthority` dir (manual — the exact grant, human confirms) | partial |
 
-`partial` means AUTOPRIV sets the stage (version checks, rule parsing) but a human confirms the final step — the tool says so instead of faking it.
+**Windows vectors (v1.9)** — enumerated by the native Windows scanners, every technique printed as the exact manual command:
+
+| Vector | What it checks | Auto? |
+|---|---|---|
+| `winpriv` | token privileges: SeImpersonate → potato family (PrintSpoofer/GodPotato/JuicyPotatoNG), SeBackup (SAM/SYSTEM hive dump), SeDebug, SeLoadDriver, SeTakeOwnership, SeRestore, SeCreateToken, SeTcb (Priv2Admin primitives); UAC-filtered-admin surface (medium integrity + Administrators) | manual |
+| `winreg` | AlwaysInstallElevated in BOTH hives (any `.msi` installs as SYSTEM), plaintext AutoLogon password, `EnableLUA=0` (UAC off), saved PuTTY sessions | manual |
+| `winservice` | unquoted service paths with spaces (binary-planting chain, writable-ancestor checked), service binaries in user-writable directories, SYSTEM services running user-profile binaries | manual |
+| `winauto` | Run/RunOnce autorun keys (HKLM/HKCU + Wow6432Node) whose binary or directory the current user can rewrite | manual |
+| `wintask` | scheduled tasks executing user-writable commands, privileged tasks with user-profile scripts | manual |
+| `wincred` | unattend/sysprep answer files with password fields, GPP `cpassword` (MS14-025 — public AES key), PowerShell history, AWS/Azure/SSH key material | manual |
+| `winpath` | writable directories in the Windows PATH — binary/DLL hijack of privileged resolutions | manual |
+
+`partial` means AUTOPRIV sets the stage (version checks, rule parsing) but a human confirms the final step — the tool says so instead of faking it. On Windows every vector is `manual` by design: v1.9 enumerates and prints the exact technique (payload generation, registry reads, binary planting), and the exploit phase reports an honest "Linux-only" instead of pretending.
 
 The `docker`/`container` probes inherit your shell environment, so a daemon configured via `DOCKER_HOST` (remote or local) counts as reachable — the finding says "verify rootful vs rootless" because a rootless daemon contains the classic breakout.
+
+## Windows support (v1.9)
+
+The same binary source builds and runs natively on Windows (`windows/amd64`, `windows/arm64`): the platform layer (`platform_windows.go` + `windows_scan.go`) owns every OS-shaped question, and the CI runs a real Windows job — build, vet, the full test suite and a live scan whose `--json` contract is validated on the runner.
+
+What works on Windows:
+
+- **All 8 WIN* scanners** (see the vector table above) — read-only, using only built-ins (`reg.exe`, `whoami.exe`, PowerShell CIM), each bounded by `--scan-timeout`.
+- **The complete reporting pipeline**: terminal, `--json`, `--report`, `--html`, `--sarif`, hardening score, `--baseline` diff, the three CI gates, `--explain`/`--ignore`/`--list-vectors`/`--list-sources`/`--completion`.
+- **ANSI colors** in Windows Terminal natively, and in legacy `conhost` via the `ENABLE_VIRTUAL_TERMINAL_PROCESSING` flip the binary performs on startup (`--no-color` always available).
+
+What stays Linux-only in v1.9: auto-exploitation (`--exploit`) and the 20 Linux scanners (SUID, sudo, cron, systemd, polkit, …) — the Windows phase says so instead of silently no-op'ing. The one deliberate probe exception to "read-only": directory-writability is tested by creating and deleting a 0-byte temp file (ACLs cannot be read from permission bits on Windows — winPEAS probes the same way).
+
+Deployment requirements for every platform live in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Output formats
 

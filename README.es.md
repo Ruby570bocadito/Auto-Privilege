@@ -2,7 +2,7 @@
 
 <h1 align="center">AUTOPRIV</h1>
 
-<p align="center"><b>Suite automatizada de escalada de privilegios en Linux — escanea, enumera, hazte root.</b><br>
+<p align="center"><b>Suite automatizada de escalada de privilegios en Linux + Windows — escanea, enumera, hazte root.</b><br>
 Un binario Go. Cero dependencias. Resultados honestos.</p>
 
 <p align="center">
@@ -30,11 +30,12 @@ Todo en ella es deliberadamente honesto. Los vectores que no puede verificar aut
 
 | | |
 |---|---|
-| **20 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible (+ candidatos de inyección wildcard), inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS (no_root_squash + exports rw sin host), directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud, `ld.so.preload`, sudoers escribible (fichero, directorio y drop-ins por fichero), `/etc/group` escribible, hooks de login escribibles (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`), superficies de política polkit escribibles (`rules.d`, ficheros `.rules`, dirs `localauthority`) |
+| **Linux: 20 escáneres de solo-lectura** | SUID/SGID, reglas y versión de sudo, cron escribible (+ candidatos de inyección wildcard), inyección en passwd/shadow, grupo docker, contexto de runtimes de contenedores (podman/containerd/daemon docker), capabilities (bitmask y file caps), NFS (no_root_squash + exports rw sin host), directorios PATH escribibles, servicios systemd, CVEs de kernel, credenciales en history/configs, metadata cloud, `ld.so.preload`, sudoers escribible (fichero, directorio y drop-ins por fichero), `/etc/group` escribible, hooks de login escribibles (`/etc/environment`, `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc`), superficies de política polkit escribibles (`rules.d`, ficheros `.rules`, dirs `localauthority`) |
+| **Windows: 8 escáneres de solo-lectura (v1.9)** | privilegios del token (SeImpersonate → familia potato, SeBackup, SeDebug — primitivas Priv2Admin), superficie de admin filtrado por UAC, misconfiguraciones de registro (AlwaysInstallElevated, AutoLogon en texto plano, EnableLUA), superficie de ataque de servicios (rutas sin comillas con espacios, binarios en directorios escribibles, servicios SYSTEM ejecutando binarios de perfiles de usuario), claves autorun, tareas programadas con comandos escribibles, artefactos de credenciales (unattend/sysprep, GPP cpassword, history de PowerShell, claves cloud/SSH), secuestros de PATH |
 | **75 técnicas GTFOBins + 31 sgid** | embebidas en el binario — funciona air-gapped; actualizable desde upstream con un comando (`--list-gtfo` muestra la sección sgid) |
 | **Score de endurecimiento** | cada escaneo termina con una cifra determinista 0–100 de postura — ponderada por riesgo y explotabilidad — para que los diffs `--baseline` lean `score 60 → 85` en lugar de recuentos crudos |
 | **Playbook de endurecimiento** | `--explain cron` (o `all`) imprime los pasos exactos de remediación por fuente de hallazgo; `--report` incrusta una sección `## Hardening plan` construida con las fuentes realmente detectadas |
-| **Auto-explotación de más seguro a más agresivo** | técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root |
+| **Auto-explotación de más seguro a más agresivo** | Linux: técnicas ordenadas por riesgo, tope con `--risk`, parada con `--one-shot` al primer root. Windows (v1.9): enumeración de solo-lectura con el comando manual exacto por técnica (`--dry-run` muestra el plan) |
 | **Cinco formatos de salida** | terminal humano con rampa de color, `--json` para máquinas (`--output fichero` lo persiste, 0600), `--report` markdown con evidencias, página `--html` autocontenida para stakeholders, y `--sarif` para los dashboards de code-scanning de GitHub/GitLab |
 | **Catálogos máquina-legibles** | `--list-vectors --json`, `--list-sources` (texto o `--json`) y `--explain cron --json` hablan un mismo sobre (`tool`/`version`/`mode`) para que los dashboards ingieran el vocabulario que el propio binario usa — orden canónico, cero deriva hardcodeada |
 | **Tres puertas CI** | `--fail-on riesgo` falla cuando la superficie EXISTE en/por encima de un riesgo; `--fail-on-new` (umbral opcional: `--fail-on-new=high`) falla solo cuando CRECE — el veredicto de regresión para pipelines de endurecimiento progresivo; `--min-score n` falla mientras la cifra de postura esté bajo el suelo |
@@ -55,21 +56,28 @@ El pipeline completo, de un vistazo:
 
 ## Inicio rápido
 
-**Descarga un binario de release** (linux amd64 / arm64, enlazado estático):
+**Descarga un binario de release** (linux amd64/arm64, windows amd64/arm64 — enlazado estático; la matriz completa de requisitos está en [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)):
 
 ```bash
+# Linux
 curl -LO https://github.com/Ruby570bocadito/Auto-Privilege/releases/latest/download/autoprivilege-linux-amd64
 chmod +x autoprivilege-linux-amd64 && mv autoprivilege-linux-amd64 autoprivilege
 ./autoprivilege --help
 ```
 
-**O compílalo desde fuente** (Go 1.26+, sin dependencias que descargar):
+```powershell
+# Windows 10 1809+ / Server 2019+
+curl -LO https://github.com/Ruby570bocadito/Auto-Privilege/releases/latest/download/autoprivilege-windows-amd64.exe
+.\autoprivilege-windows-amd64.exe --help
+```
+
+**O compílalo desde fuente** (Go 1.26+, sin dependencias que descargar — cross-compile a cualquier destino desde cualquier SO):
 
 ```bash
 git clone https://github.com/Ruby570bocadito/Auto-Privilege.git
 cd Auto-Privilege
-go build -o autoprivilege .
-./autoprivilege
+go build -o autoprivilege ./cmd/autoprivilege              # nativo
+GOOS=windows go build -o autoprivilege.exe ./cmd/autoprivilege   # cross-compile windows
 ```
 
 **O pruébalo primero en el laboratorio seguro:**
@@ -193,9 +201,35 @@ Códigos de salida: `0` root conseguido · `1` sin root · `2` error de uso o ej
 | `hooks` | hooks de login escribibles: `/etc/environment` (LD_PRELOAD en cada sesión), `/etc/profile.d`, `/etc/profile`, `/etc/bash.bashrc` | manual |
 | `polkit` | superficies de política polkit escribibles: dir `rules.d` (auto — planta una regla temporal `00-` que concede `org.freedesktop.policykit.exec`, ejecuta `pkexec`, elimina la regla), fichero `.rules` escribible o dir `localauthority` (manual — el grant exacto, lo confirma un humano) | parcial |
 
-`parcial` significa que AUTOPRIV prepara el terreno (checks de versión, parseo de reglas) pero un humano confirma el paso final — la herramienta lo dice en vez de fingirlo.
+**Vectores Windows (v1.9)** — enumerados por los escáneres nativos de Windows, cada técnica impresa como el comando manual exacto:
+
+| Vector | Qué comprueba | Auto? |
+|---|---|---|
+| `winpriv` | privilegios del token: SeImpersonate → familia potato (PrintSpoofer/GodPotato/JuicyPotatoNG), SeBackup (volcado de hives SAM/SYSTEM), SeDebug, SeLoadDriver, SeTakeOwnership, SeRestore, SeCreateToken, SeTcb (primitivas Priv2Admin); superficie de admin filtrado por UAC (integridad media + Administradores) | manual |
+| `winreg` | AlwaysInstallElevated en AMBOS hives (cualquier `.msi` instala como SYSTEM), contraseña AutoLogon en texto plano, `EnableLUA=0` (UAC desactivado), sesiones PuTTY guardadas | manual |
+| `winservice` | rutas de servicio sin comillas con espacios (cadena de plantado de binarios, con check de ancestro escribible), binarios de servicio en directorios escribibles por el usuario, servicios SYSTEM ejecutando binarios de perfiles de usuario | manual |
+| `winauto` | claves autorun Run/RunOnce (HKLM/HKCU + Wow6432Node) cuyo binario o directorio puede reescribir el usuario actual | manual |
+| `wintask` | tareas programadas que ejecutan comandos escribibles por el usuario, tareas privilegiadas con scripts en perfiles de usuario | manual |
+| `wincred` | ficheros de respuesta unattend/sysprep con campos de contraseña, GPP `cpassword` (MS14-025 — clave AES pública), history de PowerShell, material de claves AWS/Azure/SSH | manual |
+| `winpath` | directorios escribibles en el PATH de Windows — secuestro de binarios/DLLs en resoluciones privilegiadas | manual |
+
+`parcial` significa que AUTOPRIV prepara el terreno (checks de versión, parseo de reglas) pero un humano confirma el paso final — la herramienta lo dice en vez de fingirlo. En Windows todos los vectores son `manual` por diseño: v1.9 enumera e imprime la técnica exacta (generación de payload, lecturas de registro, plantado de binarios), y la fase de exploit informa honestamente "solo-Linux" en vez de fingir.
 
 Los sondeos `docker`/`container` heredan el entorno de tu shell, así que un daemon configurado vía `DOCKER_HOST` (remoto o local) cuenta como alcanzable — el hallazgo dice "verify rootful vs rootless" porque un daemon rootless contiene el breakout clásico.
+
+## Soporte Windows (v1.9)
+
+La misma fuente compila y corre nativamente en Windows (`windows/amd64`, `windows/arm64`): la capa de plataforma (`platform_windows.go` + `windows_scan.go`) posee cada pregunta con forma de SO, y la CI ejecuta un job real de Windows — build, vet, la suite completa de tests y un escaneo real cuyo contrato `--json` se valida en el runner.
+
+Qué funciona en Windows:
+
+- **Los 8 escáneres WIN*** (ver la tabla de vectores arriba) — solo-lectura, usando solo integrados (`reg.exe`, `whoami.exe`, PowerShell CIM), cada uno limitado por `--scan-timeout`.
+- **El pipeline completo de informes**: terminal, `--json`, `--report`, `--html`, `--sarif`, score de endurecimiento, diff `--baseline`, las tres puertas CI, `--explain`/`--ignore`/`--list-vectors`/`--list-sources`/`--completion`.
+- **Colores ANSI** en Windows Terminal de forma nativa, y en `conhost` heredado mediante el flip `ENABLE_VIRTUAL_TERMINAL_PROCESSING` que el binario hace al arrancar (`--no-color` siempre disponible).
+
+Qué queda solo-Linux en v1.9: la auto-explotación (`--exploit`) y los 20 escáneres de Linux (SUID, sudo, cron, systemd, polkit, …) — la fase Windows lo dice en vez de callar. La única excepción deliberada al "solo-lectura": la escribibilidad de directorios se prueba creando y borrando un fichero temporal de 0 bytes (las ACL no se leen de los bits de permiso en Windows — winPEAS sondea igual).
+
+Los requisitos de despliegue de cada plataforma están en [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Formatos de salida
 

@@ -22,6 +22,11 @@ jobs:
         run: go test -race -count=1 ./...
       - name: Vet
         run: go vet ./...
+      - name: Vet (windows target)
+        # The Windows platform layer (platform_windows.go, windows_scan.go,
+        # windows_enum.go) compiles+ vets on every push: a Linux-only eye
+        # must never be the only one that saw the Windows code.
+        run: GOOS=windows go vet ./...
       - name: Gofmt
         run: test -z "$(gofmt -l .)"
 
@@ -39,6 +44,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - name: Enable unprivileged user namespaces
+        # Ubuntu 24.04 runners ship AppArmor's unprivileged-userns
+        # restriction ON, which makes the lab's `unshare -r -m` fail with
+        # EPERM (actions/runner-images#10109). The lab needs a mapped-root
+        # user namespace; nothing else on the runner depends on this
+        # sysctl, and the VM is ephemeral.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Lab smoke test — --json --quiet stdout contract
         run: |
           OUT=$(lab/rootless_lab.sh --json --quiet 2>/dev/null)
@@ -46,3 +58,36 @@ jobs:
           echo "$OUT" | jq -e '.summary.findings > 0' > /dev/null
           echo "$OUT" | jq -e '.summary.vectors > 0' > /dev/null
           echo "lab stdout is a clean JSON report: OK"
+
+  # v1.9: the Windows platform layer runs FOR REAL on a Windows runner —
+  # build, vet and a live enumeration scan whose JSON contract is validated
+  # with PowerShell's own parser. The Windows binary must never be a
+  # cross-compile-only artifact that nobody executed.
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Build
+        run: go build -v ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        # The suite is platform-agnostic by design (no syscall in tests);
+        # anything that only passes on Linux is a bug worth catching here.
+        run: go test -count=1 ./...
+      - name: Smoke — CLI contract on a real Windows host
+        run: |
+          go build -o autoprivilege.exe ./cmd/autoprivilege
+          ./autoprivilege.exe --version
+          ./autoprivilege.exe --list-vectors | Select-String "winpriv"
+          ./autoprivilege.exe --explain winreg | Select-String "AlwaysInstallElevated"
+          ./autoprivilege.exe --json --output win-scan.json
+          $j = Get-Content win-scan.json -Raw | ConvertFrom-Json
+          if ($j.tool -ne "Auto-Privilege") { throw "JSON contract broken: tool=$($j.tool)" }
+          if ($null -eq $j.summary) { throw "JSON contract broken: no summary" }
+          Write-Host "windows scan OK: findings=$($j.summary.findings) vectors=$($j.summary.vectors)"
+        shell: pwsh
